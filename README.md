@@ -582,13 +582,17 @@ The `self-harness model-preflight` command (and the equivalent
 and explicit live checks:
 
 ```bash
-self-harness model-preflight --backend glm --mode replay   # offline fixture
-self-harness model-preflight --backend glm --mode live     # contacts Z.ai
+self-harness model-preflight --backend glm --mode replay              # offline fixture
+ZAI_API_KEY=<secret> self-harness model-preflight --backend glm --mode live
 ```
 
-A live GLM 5.2 check that returns Z.ai `code 1113` ("Insufficient balance")
-confirms the endpoint, API key, and `glm-5.2` model id are all valid — the
-account merely needs funding. See `docs/operations/web_interface.md`.
+GLM 5.2 is driven through the **Z.ai GLM Coding Plan** by default: its
+Anthropic-compatible Messages endpoint (`https://api.z.ai/api/anthropic`),
+authenticated with `ZAI_API_KEY`. The harness translates the proposer's
+OpenAI-shaped request to the Messages wire format and back, so the coding-plan
+subscription works without prepaid API balance. Set
+`ZAI_BASE_URL=https://api.z.ai/api/paas/v4` to use the pay-as-you-go
+OpenAI-compatible endpoint instead. See `docs/operations/web_interface.md`.
 
 ## Operator Console
 

@@ -80,10 +80,12 @@ def test_model_backend_preflight_live_fails_closed_on_missing_env() -> None:
     report = evaluate_model_backend_preflight(mode="live", backend_ids=("glm",), env={})
     payload = model_backend_preflight_report_to_jsonable(report)
 
+    # The GLM coding plan defaults its endpoint, so only the API key is strictly required; the
+    # check must still fail closed when the key is absent.
     assert payload["ok"] is False
     assert payload["checks"][0]["status"] == "fail"
-    assert "ZAI_BASE_URL" in payload["checks"][0]["detail"]
     assert "ZAI_API_KEY" in payload["checks"][0]["detail"]
+    assert "ZAI_BASE_URL" not in payload["checks"][0]["detail"]
 
 
 def test_model_backend_preflight_live_transport_error_is_failed_check() -> None:

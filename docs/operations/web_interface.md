@@ -45,13 +45,26 @@ POST /api/runs                        start a run (JSON body of engine knobs)
 ## GLM 5.2 proposer backend
 
 To use Z.ai GLM 5.2 as the live proposer backend, set operator-held secrets
-outside Git:
+outside Git. The default endpoint is the **GLM Coding Plan** (Anthropic-compatible
+Messages API):
 
 ```bash
 export ZAI_API_KEY="<operator-secret>"
-export ZAI_BASE_URL="https://api.z.ai/api/paas/v4"
 self-harness ui --proposer glm --host 127.0.0.1 --port 8765 --root . --runs-dir runs
 ```
+
+The harness auto-selects the wire format from the endpoint:
+
+- **Coding Plan (subscription)** — `https://api.z.ai/api/anthropic` (the default).
+  Served on Z.ai's Anthropic-compatible Messages API; authenticated with
+  `ZAI_API_KEY` via `x-api-key`. This is what a GLM Coding Plan subscription uses.
+- **Pay-as-you-go PaaS** — set `ZAI_BASE_URL=https://api.z.ai/api/paas/v4` to use
+  the OpenAI-compatible `/chat/completions` endpoint instead (requires prepaid
+  account balance).
+
+If a live check returns `code 1113 "Insufficient balance"`, you are pointed at the
+PaaS endpoint without prepaid balance — switch to the coding-plan endpoint (unset
+`ZAI_BASE_URL` or set it to `https://api.z.ai/api/anthropic`).
 
 ### Verifying GLM connectivity
 
@@ -62,23 +75,13 @@ command:
 # Offline replay against a recorded fixture (no network):
 self-harness model-preflight --backend glm --mode replay
 
-# Live reachability against the real Z.ai endpoint:
-self-harness model-preflight --backend glm --mode live
+# Live reachability against the real Z.ai endpoint (coding plan by default):
+ZAI_API_KEY=<secret> self-harness model-preflight --backend glm --mode live
 ```
 
 `--mode live` contacts the provider and reports the exact result. A successful
-chat completion means GLM 5.2 is fully operational. A response carrying
-`code 1113 "Insufficient balance or no resource package"` means the endpoint,
-API key, and `glm-5.2` model id are all valid and accepted — the Z.ai **account
-simply needs funding**. The console surfaces this as a distinct "needs funding"
-status rather than "unreachable".
-
-### Funding GLM 5.2
-
-If `model-preflight --mode live` reports code `1113`, log into the Z.ai console
-for the account behind `ZAI_API_KEY` and add a balance / resource package. No
-code or configuration change is required — live completions begin working as
-soon as the account balance is positive.
+chat completion (`ok: true`) means GLM 5.2 is fully operational. The console
+surfaces the same status as an "operational" banner.
 
 ## Remote access
 

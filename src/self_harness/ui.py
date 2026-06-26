@@ -26,7 +26,7 @@ from self_harness.engine import SelfHarnessEngine
 from self_harness.llm_proposer import LLMProposer
 from self_harness.model_backend_preflight import (
     ModelBackendPreflightError,
-    UrlLibChatCompletionTransport,
+    build_zai_transport,
     evaluate_model_backend_preflight,
     model_backend_preflight_report_to_jsonable,
 )
@@ -431,8 +431,8 @@ def _build_proposer(
         api_key = os.environ.get("ZAI_API_KEY")
         if not api_key:
             raise RuntimeError("missing ZAI_API_KEY for GLM proposer")
-        base_url = os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/paas/v4")
-        transport = UrlLibChatCompletionTransport(base_url=base_url, api_key=api_key)
+        base_url = os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/anthropic")
+        transport = build_zai_transport(base_url=base_url, api_key=api_key)
         return LLMProposer(
             GLMClient(transport=transport, max_tokens=4096, temperature=0.0, on_usage=on_usage)
         )

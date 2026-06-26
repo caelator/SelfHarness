@@ -126,6 +126,170 @@ class UrlLibChatCompletionTransport:
         return headers
 
 
+class AnthropicMessagesTransport:
+    """Anthropic-compatible Messages transport for the Z.ai GLM coding plan.
+
+    The coding plan is served on Z.ai's Anthropic-compatible endpoint
+    (``https://api.z.ai/api/anthropic/v1/messages``) rather than the OpenAI-style
+    ``/chat/completions`` endpoint, which requires prepaid balance and otherwise returns
+    ``code 1113``. This transport implements the same ``ChatCompletionTransport`` contract used by
+    the paper-model clients: it accepts an OpenAI-shaped chat-completion request and returns an
+    OpenAI-shaped response, translating to and from the Anthropic Messages wire format in between so
+    ``GLMClient`` and the rest of the harness need no changes.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        api_key: str,
+        anthropic_version: str = "2023-06-01",
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        if not base_url.strip():
+            raise ValueError("base_url must be non-empty")
+        if not api_key.strip():
+            raise ValueError("api_key must be non-empty")
+        self.base_url = base_url
+        self.api_key = api_key
+        self.anthropic_version = anthropic_version
+        self.timeout_seconds = timeout_seconds
+
+    def create_chat_completion(self, payload: Mapping[str, object]) -> Mapping[str, object]:
+        request = urllib.request.Request(
+            _messages_url(self.base_url),
+            data=(stable_json_dumps(_to_messages_request(payload)) + "\n").encode("utf-8"),
+            headers=self._headers(),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            body = _read_error_body(exc)
+            detail = f"messages HTTP error: status={exc.code}"
+            if body:
+                detail = f"{detail}; body={body}"
+            raise LLMClientError(detail) from exc
+        except urllib.error.URLError as exc:
+            raise LLMClientError(f"messages request failed: {exc.reason}") from exc
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise LLMClientError("messages response was not valid JSON") from exc
+        if not isinstance(data, dict):
+            raise LLMClientError("messages response must be a JSON object")
+        return _from_messages_response(cast(dict[str, object], data))
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "self-harness-model-backend-preflight/1.0",
+            "x-api-key": self.api_key,
+            "anthropic-version": self.anthropic_version,
+        }
+
+
+def _messages_url(base_url: str) -> str:
+    stripped = base_url.rstrip("/")
+    if stripped.endswith("/v1/messages"):
+        return stripped
+    return f"{stripped}/v1/messages"
+
+
+def _to_messages_request(payload: Mapping[str, object]) -> dict[str, object]:
+    """Translate an OpenAI chat-completion request into an Anthropic Messages request."""
+
+    messages_in = payload.get("messages")
+    system_parts: list[str] = []
+    turns: list[dict[str, object]] = []
+    if isinstance(messages_in, list):
+        for message in messages_in:
+            if not isinstance(message, Mapping):
+                continue
+            role = message.get("role")
+            content = message.get("content")
+            text = content if isinstance(content, str) else stable_json_dumps(content)
+            if role == "system":
+                system_parts.append(text)
+            else:
+                # Anthropic only accepts "user" and "assistant" roles.
+                turns.append({"role": "assistant" if role == "assistant" else "user", "content": text})
+    if not turns:
+        turns.append({"role": "user", "content": ""})
+
+    request: dict[str, object] = {
+        "model": payload.get("model"),
+        "messages": turns,
+        "max_tokens": payload.get("max_tokens", 4096),
+    }
+    if system_parts:
+        request["system"] = "\n\n".join(system_parts)
+    temperature = payload.get("temperature")
+    if isinstance(temperature, (int, float)):
+        request["temperature"] = float(temperature)
+    return request
+
+
+def _from_messages_response(data: Mapping[str, object]) -> dict[str, object]:
+    """Translate an Anthropic Messages response into an OpenAI chat-completion response."""
+
+    content = data.get("content")
+    text_parts: list[str] = []
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, Mapping) and block.get("type") == "text":
+                value = block.get("text")
+                if isinstance(value, str):
+                    text_parts.append(value)
+    text = "".join(text_parts)
+
+    usage_out: dict[str, int] = {}
+    usage_in = data.get("usage")
+    if isinstance(usage_in, Mapping):
+        input_tokens = usage_in.get("input_tokens")
+        output_tokens = usage_in.get("output_tokens")
+        if isinstance(input_tokens, int):
+            usage_out["prompt_tokens"] = input_tokens
+        if isinstance(output_tokens, int):
+            usage_out["completion_tokens"] = output_tokens
+        if "prompt_tokens" in usage_out and "completion_tokens" in usage_out:
+            usage_out["total_tokens"] = usage_out["prompt_tokens"] + usage_out["completion_tokens"]
+
+    response: dict[str, object] = {
+        "model": data.get("model", ""),
+        "choices": [{"message": {"role": "assistant", "content": text}}],
+    }
+    if usage_out:
+        response["usage"] = usage_out
+    return response
+
+
+def is_anthropic_messages_endpoint(base_url: str) -> bool:
+    """Z.ai coding-plan subscriptions are served on the Anthropic-compatible endpoint."""
+
+    lowered = base_url.lower()
+    return "/anthropic" in lowered or lowered.rstrip("/").endswith("/v1/messages")
+
+
+def build_zai_transport(*, base_url: str, api_key: str | None) -> ChatCompletionTransport:
+    """Select the right Z.ai transport for the configured endpoint.
+
+    The coding plan uses the Anthropic-compatible Messages endpoint
+    (``.../api/anthropic``); the pay-as-you-go PaaS plan uses the OpenAI-compatible
+    ``/chat/completions`` endpoint. The endpoint URL determines which wire format to speak.
+    """
+
+    if is_anthropic_messages_endpoint(base_url):
+        if not api_key:
+            raise LLMClientError("Z.ai coding-plan endpoint requires an API key (ZAI_API_KEY)")
+        return AnthropicMessagesTransport(base_url=base_url, api_key=api_key)
+    return UrlLibChatCompletionTransport(base_url=base_url, api_key=api_key)
+
+
+
+
 def evaluate_model_backend_preflight(
     *,
     mode: str,
@@ -266,15 +430,16 @@ def _live_check(
     env: Mapping[str, str],
     transport_overrides: Mapping[str, ChatCompletionTransport],
 ) -> ModelBackendPreflightCheck:
-    missing = _missing_live_environment(backend.spec, env)
+    missing = _missing_live_environment(backend.spec, env, backend.backend_id)
     if missing:
         return _failed_check(backend, "missing live environment variable(s): " + ", ".join(missing))
     usage: dict[str, int] = {}
     try:
         transport = transport_overrides.get(backend.backend_id)
         if transport is None:
-            transport = UrlLibChatCompletionTransport(
-                base_url=env[backend.spec.endpoint_env],
+            base_url = env.get(backend.spec.endpoint_env) or _default_endpoint(backend.backend_id)
+            transport = build_zai_transport(
+                base_url=base_url,
                 api_key=env.get(backend.spec.credential_env) if backend.spec.credential_env is not None else None,
             )
         client = backend.client_factory(transport, usage.update)
@@ -306,11 +471,26 @@ def _failed_check(backend: ModelBackendRuntime, detail: str) -> ModelBackendPref
     )
 
 
-def _missing_live_environment(spec: PaperModelBackendSpec, env: Mapping[str, str]) -> tuple[str, ...]:
-    required = [spec.endpoint_env]
-    if spec.credential_env is not None:
+_DEFAULT_ENDPOINTS: dict[str, str] = {
+    # The GLM coding plan only requires ZAI_API_KEY; default to its Anthropic-compatible endpoint.
+    "glm": "https://api.z.ai/api/anthropic",
+}
+
+
+def _default_endpoint(backend_id: str) -> str:
+    endpoint = _DEFAULT_ENDPOINTS.get(backend_id)
+    if endpoint is None:
+        raise ModelBackendPreflightError(f"no default endpoint for backend: {backend_id}")
+    return endpoint
+
+
+def _missing_live_environment(spec: PaperModelBackendSpec, env: Mapping[str, str], backend_id: str) -> tuple[str, ...]:
+    required: list[str] = []
+    if not env.get(spec.endpoint_env) and backend_id not in _DEFAULT_ENDPOINTS:
+        required.append(spec.endpoint_env)
+    if spec.credential_env is not None and not env.get(spec.credential_env):
         required.append(spec.credential_env)
-    return tuple(name for name in required if not env.get(name))
+    return tuple(required)
 
 
 def _load_replay_response(backend: ModelBackendRuntime, replay_path: Path | None) -> Mapping[str, object]:
