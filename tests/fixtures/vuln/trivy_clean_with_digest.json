@@ -1,0 +1,17 @@
+{
+  "ArtifactName": "registry.example/trusted/verifier:1",
+  "ArtifactType": "container_image",
+  "Metadata": {
+    "RepoDigests": [
+      "registry.example/trusted/verifier@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+  },
+  "Results": [
+    {
+      "Class": "os-pkgs",
+      "Target": "alpine:3.20",
+      "Type": "alpine"
+    }
+  ],
+  "SchemaVersion": 2
+}

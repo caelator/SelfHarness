@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "backend": "qwen",
+  "reproduction_claimed": false,
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "qwen preflight ok"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 8,
+      "completion_tokens": 4,
+      "total_tokens": 12
+    }
+  }
+}

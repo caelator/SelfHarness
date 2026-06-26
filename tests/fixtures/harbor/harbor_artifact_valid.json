@@ -1,0 +1,17 @@
+{
+  "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "media_type": "application/vnd.oci.image.manifest.v1+json",
+  "references": [
+    {
+      "child_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "tags": [
+    {
+      "name": "1.0.0"
+    },
+    {
+      "name": "stable"
+    }
+  ]
+}

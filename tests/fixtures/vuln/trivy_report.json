@@ -1,0 +1,39 @@
+{
+  "ArtifactName": "trusted/verifier:1",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Class": "os-pkgs",
+      "Target": "alpine:3.20",
+      "Type": "alpine",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2026-1001",
+          "PkgName": "openssl",
+          "InstalledVersion": "3.3.0-r0",
+          "FixedVersion": "3.3.1-r0, 3.3.2-r0",
+          "Severity": "HIGH",
+          "Status": "fixed",
+          "Title": "OpenSSL fixture vulnerability",
+          "Description": "Fixture container package vulnerability."
+        }
+      ]
+    },
+    {
+      "Class": "lang-pkgs",
+      "Target": "app/requirements.txt",
+      "Type": "python-pkg",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "GHSA-abcd-1234",
+          "PkgName": "example-lib",
+          "InstalledVersion": "1.2.3",
+          "FixedVersion": "1.2.4",
+          "Severity": "CRITICAL",
+          "Aliases": ["CVE-2026-0001"]
+        }
+      ]
+    }
+  ],
+  "SchemaVersion": 2
+}

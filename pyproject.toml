@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "self-harness"
+version = "0.1.0"
+description = "A small, auditable implementation of the Self-Harness loop."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+license-files = ["LICENSE"]
+authors = [{ name = "SelfHarness contributors" }]
+dependencies = []
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+anthropic = [
+  "anthropic>=0.40,<1.0",
+]
+dev = [
+  "build>=1.2",
+  "cryptography>=42",
+  "hatchling>=1.25",
+  "mypy>=1.13",
+  "pytest>=8.0",
+  "ruff>=0.8",
+]
+provenance = [
+  "cryptography>=42",
+]
+release = [
+  "build>=1.2",
+  "cyclonedx-bom>=5.0",
+  "hatchling>=1.25",
+]
+sigstore = [
+  "sigstore>=3.6.7,<4",
+]
+terminal-bench = []
+vuln = [
+  "pip-audit>=2.7",
+]
+
+[project.scripts]
+self-harness = "self_harness.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/self_harness"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/README.md",
+  "/RELEASE.md",
+  "/docs/architecture",
+  "/docs/operations",
+  "/docs/source/audit_trajectory.md",
+  "/docs/source/audit_integrity.md",
+  "/docs/source/llm_proposer_integration.md",
+  "/examples",
+  "/pyproject.toml",
+  "/scripts",
+  "/src",
+  "/tests",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["self_harness"]
+strict = true
+warn_unused_configs = true

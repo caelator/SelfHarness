@@ -1,0 +1,161 @@
+{
+  "schema_version": "1.1",
+  "entries": [
+    {
+      "dependency": "Harbor registry endpoint",
+      "domain": "harbor",
+      "status": "blocked",
+      "affects": [
+        "terminal-bench --mode live",
+        "terminal-bench-preflight",
+        "terminal-bench-capture",
+        "harbor-discovery live",
+        "scripts/harbor_discovery.py"
+      ],
+      "offline_fixture": "tests/fixtures/harbor/harbor_artifact_valid.json",
+      "operator_remediation": "Provision a reachable Harbor project, repository, and immutable digest reference for Terminal-Bench agents.",
+      "reproduction_relevant": true,
+      "preflight_surface": "harbor_discovery_check",
+      "operator_action": "discover"
+    },
+    {
+      "dependency": "Docker daemon",
+      "domain": "docker",
+      "status": "blocked",
+      "affects": [
+        "terminal-bench --mode live",
+        "terminal-bench-preflight",
+        "container-demo --mode live",
+        "scripts/container_preflight_report.py"
+      ],
+      "offline_fixture": "tests/fixtures/container_verifier/pass.json",
+      "operator_remediation": "Start the approved local or CI Docker runtime and confirm container verifier preflight can execute tasks.",
+      "reproduction_relevant": true,
+      "preflight_surface": "container_preflight",
+      "operator_action": "provision"
+    },
+    {
+      "dependency": "Trivy binary and scanner database",
+      "domain": "trivy",
+      "status": "blocked",
+      "affects": [
+        "scripts/scanner_run.py live",
+        "scripts/scanner_db_update.py live",
+        "scripts/vuln_check.py --format trivy"
+      ],
+      "offline_fixture": "tests/fixtures/vuln/trivy_fresh_with_timestamp.json",
+      "operator_remediation": "Install the approved Trivy version, seed a fresh scanner database, and publish live scan output as release/operator material.",
+      "reproduction_relevant": true,
+      "preflight_surface": "scanner_check",
+      "operator_action": "scan"
+    },
+    {
+      "dependency": "Sigstore Fulcio/Rekor trust material",
+      "domain": "sigstore",
+      "status": "blocked",
+      "affects": [
+        "verify-attestation --backend sigstore"
+      ],
+      "offline_fixture": "tests/fixtures/attestations/sigstore_bundle.json",
+      "operator_remediation": "Provide canonical Sigstore bundle material and a trust root compatible with the sigstore-python verifier backend.",
+      "reproduction_relevant": true,
+      "preflight_surface": "attestation_check",
+      "operator_action": "configure"
+    },
+    {
+      "dependency": "PyPI trusted publishing",
+      "domain": "pypi",
+      "status": "blocked",
+      "affects": [
+        "release workflow PyPI publish"
+      ],
+      "offline_fixture": ".github/workflows/release.yml",
+      "operator_remediation": "Configure PyPI trusted publishing for the release workflow and verify the package publish job in an operator-owned environment.",
+      "reproduction_relevant": true,
+      "preflight_surface": "release_smoke",
+      "operator_action": "publish"
+    },
+    {
+      "dependency": "Anthropic model API credentials",
+      "domain": "model",
+      "status": "optional",
+      "affects": [
+        "LLMProposer AnthropicClaudeClient"
+      ],
+      "offline_fixture": "tests/adapters/llm/test_anthropic_client_contract.py",
+      "operator_remediation": "Attach an operator-approved secret provider for ANTHROPIC_API_KEY when using the package's reference Anthropic adapter. This is not one of the paper's evaluated model backends.",
+      "reproduction_relevant": false,
+      "preflight_surface": "none",
+      "operator_action": "configure"
+    },
+    {
+      "dependency": "MiniMax M2.5 model API credentials",
+      "domain": "model",
+      "status": "blocked",
+      "affects": [
+        "LLMProposer MiniMaxClient",
+        "scripts/model_backend_preflight.py"
+      ],
+      "offline_fixture": "tests/adapters/llm/test_minimax_client_contract.py",
+      "operator_remediation": "Attach operator-approved MiniMax hosted API credentials for the paper's MiniMax M2.5 backend and run the adapter against the real endpoint in an operator-owned environment.",
+      "reproduction_relevant": true,
+      "preflight_surface": "model_backend_preflight",
+      "operator_action": "configure"
+    },
+    {
+      "dependency": "Qwen3.5-35B-A3B model deployment",
+      "domain": "model",
+      "status": "blocked",
+      "affects": [
+        "LLMProposer QwenClient",
+        "scripts/model_backend_preflight.py"
+      ],
+      "offline_fixture": "tests/adapters/llm/test_qwen_client_contract.py",
+      "operator_remediation": "Provision the paper's Qwen3.5-35B-A3B local deployment behind an approved SGLang-compatible endpoint and expose it to the adapter from operator-owned infrastructure.",
+      "reproduction_relevant": true,
+      "preflight_surface": "model_backend_preflight",
+      "operator_action": "provision"
+    },
+    {
+      "dependency": "GLM-5.2 model API credentials",
+      "domain": "model",
+      "status": "blocked",
+      "affects": [
+        "LLMProposer GLMClient",
+        "scripts/model_backend_preflight.py"
+      ],
+      "offline_fixture": "tests/adapters/llm/test_glm_client_contract.py",
+      "operator_remediation": "Attach operator-approved Z.ai credentials for the GLM-5.2 backend and run the adapter against the real endpoint in an operator-owned environment.",
+      "reproduction_relevant": true,
+      "preflight_surface": "model_backend_preflight",
+      "operator_action": "configure"
+    },
+    {
+      "dependency": "Scanner database mirror credentials",
+      "domain": "scanner-db",
+      "status": "optional",
+      "affects": [
+        "scanner DB mirror registry config"
+      ],
+      "offline_fixture": "tests/fixtures/vuln/trivy_registry_config.json",
+      "operator_remediation": "Provide registry credentials only when the scanner database mirror requires authentication.",
+      "reproduction_relevant": false,
+      "preflight_surface": "none",
+      "operator_action": "configure"
+    },
+    {
+      "dependency": "External signer custody",
+      "domain": "kms",
+      "status": "optional",
+      "affects": [
+        "operator-promotion external signer",
+        "corpus-sign external signer"
+      ],
+      "offline_fixture": "scripts/example_external_signer.py",
+      "operator_remediation": "Wrap KMS, HSM, YubiKey, or platform-keychain signing in the documented external signer protocol.",
+      "reproduction_relevant": false,
+      "preflight_surface": "none",
+      "operator_action": "sign"
+    }
+  ]
+}

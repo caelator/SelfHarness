@@ -1,0 +1,9 @@
+{
+  "dependencies": [
+    {
+      "name": "safe-lib",
+      "version": "1.0.0",
+      "vulns": []
+    }
+  ]
+}

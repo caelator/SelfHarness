@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "backend": "glm",
+  "reproduction_claimed": false,
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "glm preflight ok"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 7,
+      "completion_tokens": 4,
+      "total_tokens": 11
+    }
+  }
+}

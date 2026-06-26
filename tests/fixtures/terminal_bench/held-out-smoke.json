@@ -1,0 +1,13 @@
+{
+  "passed": true,
+  "terminal_cause": "verifier-pass",
+  "causal_status": "confirmed",
+  "mechanism": "dry-run-fixture",
+  "message": "held-out verifier replay passed",
+  "trace": [
+    {
+      "kind": "verifier",
+      "message": "held-out verifier passed"
+    }
+  ]
+}

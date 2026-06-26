@@ -1,0 +1,10 @@
+{
+  "bundle_version": "1",
+  "owner": "self-harness-tests",
+  "expires_on": "2026-12-31",
+  "image_policy": "image_policy.json",
+  "freshness_policy": "../vuln/freshness_policy.json",
+  "vulnerability_policy": "vulnerability_policy.json",
+  "scanner_db_freshness_policy": "../vuln/scanner_db_freshness_policy.json",
+  "trusted_public_keys": ["trusted.ed25519.pub"]
+}

@@ -1,0 +1,12 @@
+{
+  "ArtifactName": "registry.example/trusted/verifier:1",
+  "ArtifactType": "container_image",
+  "Metadata": {
+    "CreatedAt": "2026-06-23",
+    "RepoDigests": [
+      "registry.example/trusted/verifier@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+  },
+  "Results": [],
+  "SchemaVersion": 2
+}

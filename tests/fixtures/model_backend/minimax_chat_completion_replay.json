@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "backend": "minimax",
+  "reproduction_claimed": false,
+  "response": {
+    "choices": [
+      {
+        "message": {
+          "content": "minimax preflight ok"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 9,
+      "completion_tokens": 4,
+      "total_tokens": 13
+    }
+  }
+}

@@ -1,0 +1,408 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  core-import:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install core package only
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+      - name: Import core package
+        run: python -c "import self_harness"
+
+  anthropic-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Anthropic adapter dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,anthropic]"
+      - name: Anthropic adapter contract tests
+        run: python -m pytest -q tests/adapters/llm
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance]"
+      - name: Check
+        run: make PYTHON=python check
+      - name: Readiness
+        run: make PYTHON=python readiness
+      - name: Readiness matrix
+        run: make PYTHON=python readiness-matrix
+
+  release-smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install release smoke dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance,release,vuln]"
+      - name: Release smoke
+        run: make PYTHON=python release-smoke
+      - name: Upload release smoke artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-smoke-${{ matrix.python-version }}
+          path: |
+            dist/*
+            sbom/*
+          if-no-files-found: ignore
+
+  reproducible-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install build verification dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,release]"
+      - name: Verify sdist-to-wheel reproducibility
+        run: make PYTHON=python reproducible-build-check
+      - name: Upload reproducible build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: reproducible-build-${{ matrix.python-version }}
+          path: |
+            dist/*
+          if-no-files-found: ignore
+
+  vuln-policy:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install vulnerability policy dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,vuln]"
+      - name: Vulnerability policy tests
+        run: python -m pytest -q tests/test_vulnerability_policy.py tests/test_vulnerability_policy_trivy.py tests/test_freshness_policy.py
+      - name: Offline vulnerability fixture check
+        run: python scripts/vuln_check.py --audit-json tests/fixtures/vuln/clean.json
+      - name: Offline Trivy vulnerability fixture check
+        run: python scripts/vuln_check.py --format trivy --audit-json tests/fixtures/vuln/trivy_clean.json
+      - name: Offline Trivy freshness fixture check
+        run: >
+          python scripts/vuln_check.py
+          --format trivy
+          --audit-json tests/fixtures/vuln/trivy_fresh_with_timestamp.json
+          --freshness-policy tests/fixtures/vuln/freshness_policy.json
+          --today 2026-06-24
+      - name: Scanner execution dry-run check
+        run: make PYTHON=python scanner-check
+      - name: Harbor discovery fixture check
+        run: make PYTHON=python harbor-discovery-check
+
+  provenance-signing:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install provenance signing dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance,release]"
+      - name: Build release provenance
+        run: make PYTHON=python provenance
+      - name: Generate ephemeral provenance signing key
+        run: mkdir -p .release-keys && self-harness corpus-keygen --out .release-keys/provenance.ed25519
+      - name: Sign release provenance
+        run: >
+          python scripts/sign_provenance.py
+          --manifest $(ls dist/*-provenance.json)
+          --private-key .release-keys/provenance.ed25519
+          --public-key .release-keys/provenance.ed25519.pub
+          --provider github-actions-ephemeral
+          --key-id ci-ephemeral
+      - name: Verify release provenance signature
+        run: >
+          python scripts/verify_provenance_signature.py
+          --manifest $(ls dist/*-provenance.json)
+          --signature $(ls dist/*-provenance.json.sig)
+          --public-key .release-keys/provenance.ed25519.pub
+
+  attestation-structural:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install attestation dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance]"
+      - name: Offline attestation structural gate
+        run: make PYTHON=python attestation-check
+      - name: Upload attestation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: attestation-${{ matrix.python-version }}
+          path: |
+            dist/self-harness-pypi-attestation.json
+            dist/self-harness-attestation.json
+
+  sigstore-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install contract-test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Sigstore backend contract tests
+        run: python -m pytest -q tests/adapters/attestations
+
+  sigstore-crypto-backend:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Sigstore backend dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance,sigstore]"
+      - name: Sigstore crypto backend tests
+        run: python -m pytest -q tests/adapters/attestations/test_sigstore_crypto_backend.py tests/invariants/test_attestation_boundary.py
+
+  operator-preflight:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install operator preflight dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance]"
+      - name: Operator policy bundle preflight
+        run: make PYTHON=python operator-check
+      - name: Operator policy promotion preflight
+        run: make PYTHON=python operator-promotion-check
+      - name: Operator policy binding verification
+        run: make PYTHON=python operator-policy-binding-check
+
+  audit-migration:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install audit migration dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Audit migration fixture matrix
+        run: make PYTHON=python migration-check
+
+  release-candidate-evidence:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install release evidence dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Verify fixture release-candidate evidence
+        run: >
+          python scripts/release_candidate_evidence.py
+          --readiness-hash tests/fixtures/canonical_audit_hash.txt
+          --vuln-report tests/fixtures/release_candidate/vuln_report.json
+          --scanner-result tests/fixtures/release_candidate/scanner_result.json
+          --scanner-db-update-result tests/fixtures/release_candidate/scanner_db_update_result.json
+          --harbor-discovery-result tests/fixtures/release_candidate/harbor_discovery_result.json
+          --operator-preflight-result tests/fixtures/release_candidate/operator_preflight_result.json
+          --operator-promotion-result tests/fixtures/release_candidate/operator_promotion_result.json
+          --operator-policy-binding-result tests/fixtures/release_candidate/operator_policy_binding_result.json
+          --readiness-matrix-result tests/fixtures/release_candidate/readiness_matrix_result.json
+          --readiness-drift-result tests/fixtures/release_candidate/readiness_drift_result.json
+          --readiness-promotion-result tests/fixtures/release_candidate/readiness_promotion_result.json
+          --reproducible-build-result tests/fixtures/release_candidate/reproducible_build_result.json
+          --audit-verify-result tests/fixtures/release_candidate/audit_verify_result.json
+          --provenance tests/fixtures/release_candidate/provenance.json
+          --provenance-signature tests/fixtures/release_candidate/provenance.sig
+          --out /tmp/self-harness-release-candidate-evidence.json
+          --expected-hash tests/fixtures/release_candidate/expected_hash.txt
+      - name: Verify readiness promotion advisory gate
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("/tmp/self-harness-release-candidate-evidence.json").read_text())
+          gate = next(gate for gate in data["gates"] if gate["name"] == "readiness_promotion")
+          assert gate["required"] is False
+          assert gate["status"] == "pass"
+          assert gate["metadata"]["ok"] is True
+          assert data["reproduction_claimed"] is False
+          PY
+      - name: Verify reproducible build release gate
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("/tmp/self-harness-release-candidate-evidence.json").read_text())
+          gate = next(gate for gate in data["gates"] if gate["name"] == "reproducible_build")
+          assert gate["required"] is True
+          assert gate["status"] == "pass"
+          assert gate["metadata"]["published_wheel_sha256"] == gate["metadata"]["rebuilt_wheel_sha256"]
+          assert data["reproduction_claimed"] is False
+          PY
+      - name: Verify opt-in reproduction evidence blocks fixture
+        run: |
+          set +e
+          python scripts/release_candidate_evidence.py \
+            --readiness-hash tests/fixtures/canonical_audit_hash.txt \
+            --vuln-report tests/fixtures/release_candidate/vuln_report.json \
+            --scanner-result tests/fixtures/release_candidate/scanner_result.json \
+            --scanner-db-update-result tests/fixtures/release_candidate/scanner_db_update_result.json \
+            --harbor-discovery-result tests/fixtures/release_candidate/harbor_discovery_result.json \
+            --operator-preflight-result tests/fixtures/release_candidate/operator_preflight_result.json \
+            --operator-promotion-result tests/fixtures/release_candidate/operator_promotion_result.json \
+            --operator-policy-binding-result tests/fixtures/release_candidate/operator_policy_binding_result.json \
+            --readiness-matrix-result tests/fixtures/release_candidate/readiness_matrix_result.json \
+            --readiness-drift-result tests/fixtures/release_candidate/readiness_drift_result.json \
+            --reproducible-build-result tests/fixtures/release_candidate/reproducible_build_result.json \
+            --reproduction-readiness-result tests/fixtures/release_candidate/reproduction_readiness_result.json \
+            --require-reproduction-readiness \
+            --audit-verify-result tests/fixtures/release_candidate/audit_verify_result.json \
+            --provenance tests/fixtures/release_candidate/provenance.json \
+            --provenance-signature tests/fixtures/release_candidate/provenance.sig \
+            --out /tmp/self-harness-release-candidate-evidence-reproduction.json
+          code=$?
+          set -e
+          test "$code" -eq 2
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("/tmp/self-harness-release-candidate-evidence-reproduction.json").read_text())
+          assert data["decision"] == "blocked"
+          gate = next(gate for gate in data["gates"] if gate["name"] == "reproduction_readiness")
+          assert gate["status"] == "fail"
+          assert gate["metadata"]["reproduction_ready"] is False
+          PY
+
+  readiness-drift:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install readiness drift dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance]"
+      - name: Readiness drift check
+        run: make PYTHON=python readiness-drift-check
+
+  reproduction-readiness:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install reproduction readiness dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Reproduction readiness report
+        run: make PYTHON=python reproduction-readiness-check
+      - name: Verify reproduction readiness is explicitly not ready
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          from pathlib import Path
+          data = json.loads(Path("dist/self-harness-reproduction-readiness.json").read_text())
+          assert data["ok"] is True
+          assert data["reproduction_ready"] is False
+          assert data["reproduction_claimed"] is False
+          assert re.fullmatch(r"[0-9a-f]{64}", data["report_hash"])
+          assert len(data["checks"]) == 12
+          assert {check["status"] for check in data["checks"]} == {"fail"}
+          PY

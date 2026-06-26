@@ -1,0 +1,1 @@
+{"benchmark_protocol":"terminal-bench@2.0","evaluation_repeats":1,"harbor_artifact_validation_status":"candidate","operation_allowlist":["AppendToSurface"],"protocol_version":"legacy-protocol","reproduction_claimed":false,"schema_version":"1.4","seed":4,"surface_allowlist":["bootstrap"]}

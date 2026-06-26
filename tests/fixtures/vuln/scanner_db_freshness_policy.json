@@ -1,0 +1,5 @@
+{
+  "policy_version": "1",
+  "max_age_days": 7,
+  "require_next_update": true
+}

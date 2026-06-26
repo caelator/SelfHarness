@@ -1,0 +1,1 @@
+{"allowed_subject_alternative_names":["https://github.com/self-harness/self-harness/.github/workflows/release.yml@refs/tags/v0.1.0"],"expected_certificate_issuer":"CN=SelfHarness Test Fulcio","fulcio_certificate_paths":["fulcio_root.pem"],"rekor_public_key_path":"rekor.pub","schema_version":"1.0"}

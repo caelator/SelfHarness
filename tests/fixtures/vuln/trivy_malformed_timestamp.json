@@ -1,0 +1,13 @@
+{
+  "ArtifactName": "registry.example/trusted/verifier:1",
+  "ArtifactType": "container_image",
+  "CreatedAt": "yesterday-ish",
+  "Results": [
+    {
+      "Class": "os-pkgs",
+      "Target": "alpine:3.20",
+      "Type": "alpine"
+    }
+  ],
+  "SchemaVersion": 2
+}

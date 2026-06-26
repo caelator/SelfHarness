@@ -1,0 +1,14 @@
+{
+  "passed": false,
+  "pass_if_config_contains": "When the task explicitly names a required output file",
+  "terminal_cause": "missing-artifact",
+  "causal_status": "rejected",
+  "mechanism": "missing_artifact",
+  "message": "verifier failed because the required artifact was absent",
+  "trace": [
+    {
+      "kind": "verifier",
+      "message": "missing required artifact"
+    }
+  ]
+}

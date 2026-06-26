@@ -1,0 +1,77 @@
+"""Operator policy promotion manifest, lifecycle, and attestation helpers."""
+
+from self_harness.operator_promotion.attest import (
+    load_promotion_signature,
+    promotion_signature_to_jsonable,
+    sign_promotion_manifest,
+    verify_promotion_signature,
+)
+from self_harness.operator_promotion.lifecycle import set_promotion_status
+from self_harness.operator_promotion.manifest import (
+    add_promotion_entry,
+    canonical_manifest_bytes,
+    empty_promotion_manifest,
+    init_promotion_manifest,
+    load_promotion_manifest,
+    manifest_sha256,
+    promotion_manifest_to_jsonable,
+    save_promotion_manifest,
+    validate_manifest_files,
+)
+from self_harness.operator_promotion.types import (
+    POLICY_KINDS,
+    PROMOTION_BOUNDARY,
+    PROMOTION_MANIFEST_SCHEMA_VERSION,
+    PROMOTION_SIGNATURE_ALGORITHM,
+    PROMOTION_SIGNATURE_SCHEMA_VERSION,
+    PROMOTION_STATUS_ORDER,
+    PROMOTION_STATUSES,
+    PROMOTION_VERIFICATION_SCHEMA_VERSION,
+    PolicyKind,
+    PromotionCheck,
+    PromotionEntry,
+    PromotionError,
+    PromotionManifest,
+    PromotionSignature,
+    PromotionStatus,
+    PromotionVerificationReport,
+)
+from self_harness.operator_promotion.verify import (
+    promotion_verification_report_to_jsonable,
+    verify_promotion_manifest,
+)
+
+__all__ = [
+    "POLICY_KINDS",
+    "PROMOTION_BOUNDARY",
+    "PROMOTION_MANIFEST_SCHEMA_VERSION",
+    "PROMOTION_SIGNATURE_ALGORITHM",
+    "PROMOTION_SIGNATURE_SCHEMA_VERSION",
+    "PROMOTION_STATUSES",
+    "PROMOTION_STATUS_ORDER",
+    "PROMOTION_VERIFICATION_SCHEMA_VERSION",
+    "PolicyKind",
+    "PromotionCheck",
+    "PromotionEntry",
+    "PromotionError",
+    "PromotionManifest",
+    "PromotionSignature",
+    "PromotionStatus",
+    "PromotionVerificationReport",
+    "add_promotion_entry",
+    "canonical_manifest_bytes",
+    "empty_promotion_manifest",
+    "init_promotion_manifest",
+    "load_promotion_manifest",
+    "load_promotion_signature",
+    "manifest_sha256",
+    "promotion_manifest_to_jsonable",
+    "promotion_signature_to_jsonable",
+    "promotion_verification_report_to_jsonable",
+    "save_promotion_manifest",
+    "set_promotion_status",
+    "sign_promotion_manifest",
+    "validate_manifest_files",
+    "verify_promotion_manifest",
+    "verify_promotion_signature",
+]

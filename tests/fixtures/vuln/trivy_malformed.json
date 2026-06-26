@@ -1,0 +1,10 @@
+{
+  "ArtifactName": "trusted/verifier:1",
+  "Results": [
+    {
+      "Target": "alpine:3.20",
+      "Vulnerabilities": {}
+    }
+  ],
+  "SchemaVersion": 2
+}

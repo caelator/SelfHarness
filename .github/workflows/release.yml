@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      LANG: C.UTF-8
+      TZ: UTC
+      RELEASE_PROVENANCE_PRIVATE_KEY_B64: ${{ secrets.RELEASE_PROVENANCE_PRIVATE_KEY_B64 }}
+      RELEASE_PROVENANCE_PUBLIC_KEY_B64: ${{ secrets.RELEASE_PROVENANCE_PUBLIC_KEY_B64 }}
+      RELEASE_PROVENANCE_PASSPHRASE: ${{ secrets.RELEASE_PROVENANCE_PASSPHRASE }}
+      RELEASE_PROVENANCE_PROVIDER: ${{ vars.RELEASE_PROVENANCE_PROVIDER }}
+      RELEASE_PROVENANCE_KEY_ID: ${{ vars.RELEASE_PROVENANCE_KEY_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install release dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,provenance,release,vuln]"
+      - name: Check
+        run: make PYTHON=python check
+      - name: Readiness
+        run: make PYTHON=python readiness
+      - name: Build distributions
+        run: make PYTHON=python build
+      - name: Reproducible build verification
+        run: make PYTHON=python reproducible-build-check
+      - name: Vulnerability policy check
+        run: python scripts/vuln_check.py --wheel $(ls dist/*.whl) --out dist/self-harness-vuln-report.json
+      - name: Generate SBOM
+        run: mkdir -p sbom && cyclonedx-py environment -o sbom/self_harness-sbom.json
+      - name: Generate release provenance
+        run: make PYTHON=python provenance
+      - name: Verify release provenance
+        run: python scripts/verify_provenance.py --manifest $(ls dist/*-provenance.json) --repo-root .
+      - name: Release-candidate evidence
+        run: make PYTHON=python release-candidate-evidence
+      - name: Materialize release provenance signing key
+        if: ${{ env.RELEASE_PROVENANCE_PRIVATE_KEY_B64 != '' && env.RELEASE_PROVENANCE_PUBLIC_KEY_B64 != '' }}
+        run: |
+          mkdir -p .release-keys
+          printf '%s' "$RELEASE_PROVENANCE_PRIVATE_KEY_B64" | base64 -d > .release-keys/provenance.ed25519
+          printf '%s' "$RELEASE_PROVENANCE_PUBLIC_KEY_B64" | base64 -d > .release-keys/provenance.ed25519.pub
+          chmod 600 .release-keys/provenance.ed25519
+      - name: Sign release provenance
+        if: ${{ env.RELEASE_PROVENANCE_PRIVATE_KEY_B64 != '' && env.RELEASE_PROVENANCE_PUBLIC_KEY_B64 != '' }}
+        run: |
+          set -- \
+            --manifest "$(ls dist/*-provenance.json)" \
+            --private-key .release-keys/provenance.ed25519 \
+            --public-key .release-keys/provenance.ed25519.pub \
+            --provider "${RELEASE_PROVENANCE_PROVIDER:-github-actions-secret}" \
+            --key-id "${RELEASE_PROVENANCE_KEY_ID:-release-provenance}"
+          if [ -n "$RELEASE_PROVENANCE_PASSPHRASE" ]; then
+            set -- "$@" --passphrase-env RELEASE_PROVENANCE_PASSPHRASE
+          fi
+          python scripts/sign_provenance.py "$@"
+      - name: Verify release provenance signature
+        if: ${{ env.RELEASE_PROVENANCE_PRIVATE_KEY_B64 != '' && env.RELEASE_PROVENANCE_PUBLIC_KEY_B64 != '' }}
+        run: >
+          python scripts/verify_provenance_signature.py
+          --manifest $(ls dist/*-provenance.json)
+          --signature $(ls dist/*-provenance.json.sig)
+          --public-key .release-keys/provenance.ed25519.pub
+      - name: Release smoke with provenance signature
+        if: ${{ env.RELEASE_PROVENANCE_PRIVATE_KEY_B64 != '' && env.RELEASE_PROVENANCE_PUBLIC_KEY_B64 != '' }}
+        run: >
+          python scripts/release_smoke.py
+          --wheel $(ls dist/*.whl)
+          --sdist $(ls dist/*.tar.gz)
+          --provenance $(ls dist/*-provenance.json)
+          --provenance-signature $(ls dist/*-provenance.json.sig)
+          --provenance-public-key .release-keys/provenance.ed25519.pub
+          --repo-root .
+          --out dist/self-harness-release-smoke.json
+      - name: Release smoke
+        if: ${{ env.RELEASE_PROVENANCE_PRIVATE_KEY_B64 == '' || env.RELEASE_PROVENANCE_PUBLIC_KEY_B64 == '' }}
+        run: python scripts/release_smoke.py --wheel $(ls dist/*.whl) --sdist $(ls dist/*.tar.gz) --provenance $(ls dist/*-provenance.json) --repo-root . --out dist/self-harness-release-smoke.json
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-harness-dist
+          path: |
+            dist/*
+            sbom/*
+      - name: Publish to TestPyPI
+        if: ${{ startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-rc.') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist/
+      - name: Publish to PyPI
+        if: ${{ startsWith(github.ref_name, 'v') && !contains(github.ref_name, '-rc.') }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

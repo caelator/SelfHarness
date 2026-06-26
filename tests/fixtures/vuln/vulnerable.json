@@ -1,0 +1,16 @@
+{
+  "dependencies": [
+    {
+      "name": "Example_Lib",
+      "version": "1.2.3",
+      "vulns": [
+        {
+          "id": "PYSEC-2026-1",
+          "aliases": ["CVE-2026-0001", "GHSA-abcd-1234"],
+          "fix_versions": ["1.2.4"],
+          "description": "fixture vulnerability"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"schema_version":"1.0","transforms":[{"classification":"unsupported","id":"unsupported-legacy-direct","notes":["intentionally unsupported fixture transform"],"source_schema_version":"1.0","target_schema_version":"1.4"}]}

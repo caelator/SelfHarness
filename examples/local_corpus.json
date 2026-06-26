@@ -1,0 +1,28 @@
+{
+  "corpus_version": "1",
+  "corpus_id": "local-smoke",
+  "tasks": [
+    {
+      "id": "local-pass",
+      "split": "held_in",
+      "failure_mode": "local_subprocess",
+      "description": "write and verify an answer file",
+      "metadata": {
+        "solve_command": "printf ok > answer.txt",
+        "verify_command": "test -f answer.txt",
+        "timeout_seconds": 30
+      }
+    },
+    {
+      "id": "local-held-out",
+      "split": "held_out",
+      "failure_mode": "local_subprocess",
+      "description": "verify a held-out command",
+      "metadata": {
+        "solve_command": "true",
+        "verify_command": "true",
+        "timeout_seconds": 30
+      }
+    }
+  ]
+}

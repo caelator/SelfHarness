@@ -1,0 +1,13 @@
+{
+  "policy_version": "1",
+  "entries": [
+    {
+      "image": "registry.example/trusted/verifier:1",
+      "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "status": "active",
+      "labels": {
+        "fixture": "operator-check"
+      }
+    }
+  ]
+}

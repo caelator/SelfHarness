@@ -1,0 +1,20 @@
+{
+  "dependencies": [
+    {
+      "name": "example-lib",
+      "version": "1.2.3",
+      "vulns": [
+        {
+          "id": "PYSEC-2026-1",
+          "aliases": ["CVE-2026-0001"],
+          "fix_versions": ["1.2.4"]
+        },
+        {
+          "id": "PYSEC-2026-2",
+          "aliases": ["CVE-2026-0002"],
+          "fix_versions": ["1.2.5"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "dataset": "terminal-bench",
+  "dataset_version": "2.0-fixture",
+  "tasks": [
+    {
+      "id": "write-required-artifact",
+      "split": "held_in",
+      "instruction": "Create /app/answer.txt before finishing.",
+      "verifier_script": "test -f /app/answer.txt",
+      "oracle_solution": "printf ok > /app/answer.txt",
+      "dry_run_fixture": "write-required-artifact.json"
+    },
+    {
+      "id": "held-out-smoke",
+      "split": "held_out",
+      "instruction": "Leave the environment unchanged.",
+      "verifier_script": "true",
+      "oracle_solution": "true",
+      "dry_run_fixture": "held-out-smoke.json"
+    }
+  ]
+}

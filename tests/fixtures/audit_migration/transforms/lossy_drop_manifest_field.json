@@ -1,0 +1,1 @@
+{"schema_version":"1.0","transforms":[{"classification":"lossy","drop_manifest_fields":["legacy_drop"],"id":"drop-legacy-manifest-field","notes":["drops legacy manifest field that has no schema 1.4 equivalent"],"source_schema_version":"1.0","target_schema_version":"1.4"}]}

@@ -1,0 +1,1 @@
+{"changed_surfaces":["bootstrap"],"decision_reason":"migrated_no_reason_recorded","id":"p0","patch":{"ops":[{"op":"AppendToSurface","payload":"legacy text","surface":"bootstrap"}]},"schema_version":"1.2","status":"rejected"}
