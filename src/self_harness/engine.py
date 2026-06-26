@@ -166,6 +166,10 @@ class SelfHarnessEngine:
                 split=Split.HELD_IN,
                 editable_surfaces=EDITABLE_SURFACES,
             )
+            # Persist the evidence bundle B_t (§3.2): the mined failure patterns handed to the
+            # proposer, so the cross-case evidence grounding each proposal is independently
+            # auditable from the round artifacts rather than only referenced by pattern_id.
+            write_stable_json(round_dir / "patterns.json", patterns)
             context = ProposerContext(
                 held_in_patterns=patterns,
                 passing_summaries=_passing_summaries(baseline.records),
@@ -431,6 +435,10 @@ def validate_split_partition(tasks: list[Task]) -> None:
     otherwise the same task would serve as both proposer evidence and held-out
     regression check. The corpus loader rejects duplicate ids within a split, but the
     engine must also reject the same id appearing across splits.
+
+    The held-out split must also be non-empty: it is the regression gate, and the
+    acceptance rule's held-out delta is identically zero when there are no held-out
+    tasks, which silently neutralizes the conservative non-regression promotion.
     """
 
     held_in = {task.id for task in tasks if task.split == Split.HELD_IN}
@@ -439,6 +447,11 @@ def validate_split_partition(tasks: list[Task]) -> None:
     if overlap:
         raise PaperFidelityError(
             "held-in and held-out splits must be disjoint; overlapping task id(s): " + ", ".join(overlap)
+        )
+    if not held_out:
+        raise PaperFidelityError(
+            "held-out split must be non-empty: it is the regression gate, and an empty "
+            "held-out split makes the conservative non-regression acceptance rule vacuous"
         )
 
 
@@ -592,6 +605,7 @@ def _result_rows(
             "verifier_fail": 0 if record.passed else 1,
             "terminal_cause": record.outcome.terminal_cause,
             "failure_category": record.outcome.terminal_cause,
+            "causal_status": record.outcome.causal_status,
             "mechanism": record.outcome.mechanism,
             "evaluation_repeats": result.evaluation_repeats,
         }

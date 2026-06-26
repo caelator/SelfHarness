@@ -55,9 +55,8 @@ class LLMProposer(Proposer):
             return []
 
         response = self.client.complete(prompts.system_prompt, prompts.user_prompt)
-        try:
-            raw = json.loads(response)
-        except json.JSONDecodeError:
+        raw = _extract_json_object(response)
+        if raw is None:
             object.__setattr__(self, "last_round_metadata", LLMProposerRoundMetadata())
             return []
         proposals = _parse_proposals(raw, context, set(prompts.context_pattern_ids))
@@ -229,6 +228,76 @@ def _enforce_grounding_and_diversity(proposals: list[Proposal], allowed_pattern_
         seen.add(key)
         checked.append(proposal)
     return checked
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Parse a JSON object from an LLM response, tolerating markdown fences and surrounding prose.
+
+    Chat models (GLM included) frequently wrap JSON in ```json ... ``` fences or add a sentence of
+    prose, even when asked for raw JSON. We try, in order: the whole string, the contents of a
+    fenced code block, and the first balanced ``{...}`` span. Returns the decoded object, or None if
+    no JSON object can be recovered.
+    """
+
+    candidates: list[str] = []
+    stripped = text.strip()
+    if stripped:
+        candidates.append(stripped)
+    fenced = _strip_code_fence(stripped)
+    if fenced is not None and fenced != stripped:
+        candidates.append(fenced)
+    span = _first_balanced_object(stripped)
+    if span is not None:
+        candidates.append(span)
+
+    for candidate in candidates:
+        try:
+            decoded = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
+def _strip_code_fence(text: str) -> str | None:
+    if not text.startswith("```"):
+        return None
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return None
+    body = lines[1:]
+    if body and body[-1].strip().startswith("```"):
+        body = body[:-1]
+    return "\n".join(body).strip() or None
+
+
+def _first_balanced_object(text: str) -> str | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : index + 1]
+    return None
 
 
 def _slug(value: str, fallback: int) -> str:

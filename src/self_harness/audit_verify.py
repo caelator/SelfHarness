@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -75,6 +76,7 @@ def verify_audit_run(path: Path, *, strict_migration: bool = True) -> AuditVerif
         _check_harness_snapshots(round_, lineage, previous_after, checks, root=root)
         _check_proposals(round_, lineage, audit_schema_version, checks, root=root)
         _check_evaluations(round_, audit_schema_version, checks, root=root)
+        _check_patterns(round_, checks, root=root)
         previous_after = round_.harness_after
 
     ok = all(check.status == "pass" for check in checks)
@@ -419,6 +421,60 @@ def _check_evaluations(
             "arm": committed_arm,
             "missing": committed_missing,
         } if committed_missing else {"proposal_id": committed_id, "arm": committed_arm},
+    )
+
+
+def _check_patterns(
+    round_: AuditRound,
+    checks: list[AuditVerificationCheck],
+    *,
+    root: Path,
+) -> None:
+    # patterns.json (the persisted evidence bundle B_t) is present-if-exists for back-compat with
+    # audits produced before it was written. When present, validate it is a JSON list of well-formed
+    # held-in failure patterns, so the cross-case evidence grounding each proposal is auditable.
+    patterns_path = root / "rounds" / str(round_.index) / "patterns.json"
+    if not patterns_path.is_file():
+        return
+    try:
+        raw = json.loads(patterns_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _add_check(
+            checks,
+            name=f"round_{round_.index}_patterns_readable",
+            passed=False,
+            detail="patterns.json is valid JSON",
+            path=patterns_path,
+            metadata={"error": str(exc)},
+        )
+        return
+
+    malformed: list[str] = []
+    if not isinstance(raw, list):
+        malformed.append("patterns.json must be a JSON array")
+    else:
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                malformed.append(f"pattern[{index}] is not an object")
+                continue
+            if item.get("split") != "held_in":
+                malformed.append(f"pattern[{index}] split is not held_in")
+            signature = item.get("signature")
+            has_triple = isinstance(signature, dict) and all(
+                isinstance(signature.get(key), str)
+                for key in ("terminal_cause", "causal_status", "mechanism")
+            )
+            required = ("id", "support", "task_ids", "symptoms", "verifier_evidence")
+            if not all(key in item for key in required) or not has_triple:
+                malformed.append(f"pattern[{index}] is missing required evidence fields")
+
+    _add_check(
+        checks,
+        name=f"round_{round_.index}_patterns_well_formed",
+        passed=not malformed,
+        detail="patterns.json holds held-in failure patterns with full (c,q,m) signatures",
+        path=patterns_path,
+        metadata={"problems": malformed} if malformed else None,
     )
 
 

@@ -100,7 +100,11 @@ class UrlLibChatCompletionTransport:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
-            raise LLMClientError(f"chat completion HTTP error: status={exc.code}") from exc
+            body = _read_error_body(exc)
+            detail = f"chat completion HTTP error: status={exc.code}"
+            if body:
+                detail = f"{detail}; body={body}"
+            raise LLMClientError(detail) from exc
         except urllib.error.URLError as exc:
             raise LLMClientError(f"chat completion request failed: {exc.reason}") from exc
         try:
@@ -386,6 +390,20 @@ def _chat_completions_url(base_url: str) -> str:
     if stripped.endswith("/chat/completions"):
         return stripped
     return f"{stripped}/chat/completions"
+
+
+def _read_error_body(exc: urllib.error.HTTPError, *, limit: int = 300) -> str:
+    """Return the provider's error body (e.g. Z.ai 'insufficient balance') for diagnostics.
+
+    Surfacing the body distinguishes an actionable funding/quota issue from an auth or endpoint
+    misconfiguration, both of which can present as the same HTTP status.
+    """
+
+    try:
+        raw = exc.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+    return raw[:limit].replace("\n", " ")
 
 
 def _system_prompt() -> str:

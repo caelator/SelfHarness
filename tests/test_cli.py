@@ -96,7 +96,17 @@ def test_local_demo_cli_runs_subprocess_tasks(tmp_path: Path) -> None:
                             "solve_command": "printf ok > answer.txt",
                             "verify_command": "test -f answer.txt",
                         },
-                    }
+                    },
+                    {
+                        "id": "local-pass-held-out",
+                        "split": "held_out",
+                        "failure_mode": "local_subprocess",
+                        "description": "local subprocess held-out pass",
+                        "metadata": {
+                            "solve_command": "printf ok > answer.txt",
+                            "verify_command": "test -f answer.txt",
+                        },
+                    },
                 ]
             }
         ),
@@ -573,3 +583,24 @@ def _write_corpus(path: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_model_preflight_cli_dry_run_glm(capsys) -> None:
+    code = main(["model-preflight", "--backend", "glm", "--mode", "dry-run"])
+    output = json.loads(capsys.readouterr().out)
+
+    assert code == 2  # dry-run does not contact the provider, so the backend is not "ready"
+    assert output["mode"] == "dry-run"
+    assert output["backends"] == ["glm"]
+    assert output["reproduction_claimed"] is False
+    assert output["checks"][0]["backend"] == "glm"
+    assert output["checks"][0]["metadata"]["default_model"] == "glm-5.2"
+
+
+def test_model_preflight_cli_replay_glm_passes(capsys) -> None:
+    code = main(["model-preflight", "--backend", "glm", "--mode", "replay"])
+    output = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert output["ok"] is True
+    assert output["checks"][0]["status"] == "pass"

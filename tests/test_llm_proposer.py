@@ -57,7 +57,48 @@ def test_llm_proposer_parses_valid_json() -> None:
     assert proposals[0].patch.ops[0].surface == "bootstrap"
 
 
-def test_llm_proposer_returns_empty_for_malformed_json() -> None:
+def test_llm_proposer_tolerates_markdown_fenced_json() -> None:
+    # GLM and other chat models routinely wrap JSON in ```json fences with surrounding prose,
+    # even when asked for raw JSON. The proposer must still parse such responses.
+    inner = json.dumps(
+        {
+            "proposals": [
+                {
+                    "id_suffix": "fenced",
+                    "pattern_id": "held_in__missing",
+                    "priority": 10,
+                    "ops": [
+                        {
+                            "op": "AppendToSurface",
+                            "surface": "bootstrap",
+                            "payload": "Create explicitly required artifacts early.",
+                        }
+                    ],
+                    "rationale": "addresses missing artifacts",
+                    "expected_effect": "artifact appears before verification",
+                    "regression_risks": [],
+                }
+            ]
+        }
+    )
+    client = FakeClient(f"Here is my proposal:\n```json\n{inner}\n```\nLet me know if that works.")
+
+    proposals = LLMProposer(client).propose(_context())
+
+    assert len(proposals) == 1
+    assert proposals[0].id == "r00__llm__fenced"
+
+
+def test_extract_json_object_handles_fences_prose_and_garbage() -> None:
+    from self_harness.llm_proposer import _extract_json_object
+
+    assert _extract_json_object('{"a": 1}') == {"a": 1}
+    assert _extract_json_object('```json\n{"a": 1}\n```') == {"a": 1}
+    assert _extract_json_object("prefix {\"a\": {\"b\": 2}, \"c\": \"}\"} suffix") == {"a": {"b": 2}, "c": "}"}
+    assert _extract_json_object("no json here") is None
+    assert _extract_json_object("[1, 2, 3]") is None
+
+
     assert LLMProposer(FakeClient("not-json")).propose(_context()) == []
 
 

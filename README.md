@@ -577,8 +577,34 @@ proposer = LLMProposer(AnthropicClaudeClient("claude-sonnet-4-5"))
 The package also exposes offline-testable contract clients for the paper
 backends: `MiniMaxClient`, `QwenClient`, and `GLMClient`. They require an
 operator-supplied chat-completions transport before any live request can run.
-`scripts/model_backend_preflight.py` provides the operator wrapper around those
-clients for dry-run, replay, and explicit live checks.
+The `self-harness model-preflight` command (and the equivalent
+`scripts/model_backend_preflight.py`) wraps those clients for dry-run, replay,
+and explicit live checks:
+
+```bash
+self-harness model-preflight --backend glm --mode replay   # offline fixture
+self-harness model-preflight --backend glm --mode live     # contacts Z.ai
+```
+
+A live GLM 5.2 check that returns Z.ai `code 1113` ("Insufficient balance")
+confirms the endpoint, API key, and `glm-5.2` model id are all valid — the
+account merely needs funding. See `docs/operations/web_interface.md`.
+
+## Operator Console
+
+`self-harness ui` serves a single-page operator console (stdlib HTTP server,
+CDN-loaded Alpine.js, no build step) for launching and inspecting runs:
+
+```bash
+self-harness ui --proposer glm --host 127.0.0.1 --port 8765 --root . --runs-dir runs
+```
+
+It exposes a run launcher with every engine knob, per-round trajectory with
+accept/merge badges, a round drill-down over the mined evidence bundle and
+proposals, an initial-vs-final harness diff, GLM token usage, and a live GLM
+reachability banner. It never claims benchmark reproduction. Full details and
+the JSON API are in `docs/operations/web_interface.md`.
+
 
 The proposer prompt renders held-in failure evidence only: pattern id, cluster
 support, representative task ids, symptoms, verifier evidence, and inferred
@@ -663,6 +689,7 @@ Each run writes:
 - `lineage.json`
 - `rounds/<n>/harness_before.json`
 - `rounds/<n>/harness_after.json`
+- `rounds/<n>/patterns.json`
 - `rounds/<n>/proposals.jsonl`
 - `rounds/<n>/evaluations.jsonl`
 - `trajectory.jsonl` when `audit-trajectory` is written
@@ -670,6 +697,14 @@ Each run writes:
 
 All JSON is written with stable key ordering so repeated runs with the same
 seed can be compared byte-for-byte.
+
+`rounds/<n>/patterns.json` persists the mined evidence bundle `B_t` — the
+held-in failure patterns (support, representative task ids, symptoms, verifier
+evidence, and the full `(c, q, m)` signature) handed to the proposer — so the
+cross-case evidence grounding each proposal is independently auditable rather
+than only referenced by `pattern_id`. Per-record evaluation rows persist all
+three signature components (`terminal_cause`, `causal_status`, `mechanism`) so
+the deterministic clustering is reconstructable from `evaluations.jsonl` alone.
 
 Proposal rows include `changed_surfaces`, aggregate split scores, pass counts,
 `evaluation_repeats`, `decision_reason`, and rejected/invalid candidate reasons.

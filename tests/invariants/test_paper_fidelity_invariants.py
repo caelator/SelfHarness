@@ -130,6 +130,74 @@ def test_engine_rejects_overlapping_split_partition(tmp_path: Path) -> None:
         )
 
 
+def test_engine_rejects_empty_held_out_split(tmp_path: Path) -> None:
+    # An empty held-out split makes the conservative non-regression acceptance rule vacuous
+    # (held-out delta is identically zero), silently disabling the regression gate. The engine
+    # must reject it so the paper's §4.1 partition precondition holds.
+    held_in_only = [
+        Task("only-held-in", Split.HELD_IN, "missing_artifact", "held-in instance"),
+    ]
+
+    with pytest.raises(PaperFidelityError):
+        SelfHarnessEngine(
+            tasks=held_in_only,
+            runner=ToyRunner(seed=0),
+            proposer=HeuristicProposer(),
+            out_dir=tmp_path,
+            config=EngineConfig(rounds=1, seed=0),
+        )
+
+
+def test_evaluation_rows_persist_full_cqm_signature(tmp_path: Path) -> None:
+    # §3.2: the failure signature is the triple φ(r)=(c,q,m). Per-record evaluation rows must
+    # persist all three (terminal_cause, causal_status, mechanism) so the deterministic clustering
+    # is reconstructable from evaluations.jsonl alone.
+    engine = SelfHarnessEngine(
+        tasks=demo_tasks(),
+        runner=ToyRunner(seed=0),
+        proposer=HeuristicProposer(),
+        out_dir=tmp_path,
+        config=EngineConfig(rounds=1, seed=0),
+    )
+    engine.run()
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "rounds" / "0" / "evaluations.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    record_rows = [row for row in rows if row["task_id"] != "__split_total__"]
+    assert record_rows
+    for row in record_rows:
+        assert "terminal_cause" in row
+        assert "causal_status" in row
+        assert "mechanism" in row
+
+
+def test_round_persists_evidence_bundle_patterns_json(tmp_path: Path) -> None:
+    # §3.2: the mined evidence bundle B_t handed to the proposer must be auditable from the round
+    # artifacts. patterns.json holds the held-in failure patterns with their full evidence.
+    engine = SelfHarnessEngine(
+        tasks=demo_tasks(),
+        runner=ToyRunner(seed=0),
+        proposer=HeuristicProposer(),
+        out_dir=tmp_path,
+        config=EngineConfig(rounds=1, seed=0),
+    )
+    engine.run()
+    patterns_path = tmp_path / "rounds" / "0" / "patterns.json"
+    assert patterns_path.is_file()
+    patterns = json.loads(patterns_path.read_text(encoding="utf-8"))
+    assert isinstance(patterns, list) and patterns
+    for pattern in patterns:
+        assert pattern["split"] == "held_in"
+        for key in ("id", "support", "task_ids", "symptoms", "verifier_evidence", "signature"):
+            assert key in pattern
+        signature = pattern["signature"]
+        assert {"terminal_cause", "causal_status", "mechanism"} <= set(signature)
+    # The persisted bundle round-trips the mined patterns and is verified by audit_verify.
+    report = verify_audit_run(tmp_path)
+    assert report.ok
+
+
 def test_proposer_context_rejects_held_out_pattern_and_summary_leakage() -> None:
     base_context = ProposerContext(
         held_in_patterns=[],

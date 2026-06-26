@@ -114,6 +114,12 @@ from self_harness.exceptions import (
     TaskLoadError,
 )
 from self_harness.image_policy import ImagePolicyError, load_image_policy
+from self_harness.model_backend_preflight import (
+    MODEL_BACKEND_PREFLIGHT_BOUNDARY,
+    ModelBackendPreflightError,
+    evaluate_model_backend_preflight,
+    model_backend_preflight_report_to_jsonable,
+)
 from self_harness.operator_promotion import (
     POLICY_KINDS,
     PROMOTION_STATUSES,
@@ -174,6 +180,28 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("SELF_HARNESS_UI_PROPOSER", "heuristic"),
         help="proposal backend for UI-started runs; glm requires ZAI_API_KEY",
     )
+
+    model_preflight_parser = subparsers.add_parser(
+        "model-preflight",
+        help="check a paper model backend (e.g. GLM 5.2) for reachability without claiming reproduction",
+    )
+    model_preflight_parser.add_argument(
+        "--mode",
+        choices=("dry-run", "replay", "live"),
+        default="dry-run",
+        help="dry-run (no network), replay (offline fixture), or live (contacts the provider)",
+    )
+    model_preflight_parser.add_argument(
+        "--backend",
+        choices=("all", "minimax", "qwen", "glm"),
+        action="append",
+        default=[],
+        help="model backend(s) to check; repeatable, defaults to all",
+    )
+    model_preflight_parser.add_argument("--replay", type=Path, help="replay fixture file or directory")
+    model_preflight_parser.add_argument("--today", help="optional YYYY-MM-DD stamp for deterministic reports")
+    model_preflight_parser.add_argument("--out", type=Path, help="optional path to write the JSON report")
+    model_preflight_parser.add_argument("--json", action="store_true", help="print the JSON report to stdout")
 
     audit_parser = subparsers.add_parser("audit-summary", help="summarize a Self-Harness audit directory")
     audit_parser.add_argument("path", type=Path)
@@ -797,6 +825,15 @@ def main(argv: list[str] | None = None) -> int:
             root=args.root,
             runs_dir=args.runs_dir,
             proposer_mode=args.proposer,
+        )
+    if args.command == "model-preflight":
+        return _run_model_preflight(
+            mode=args.mode,
+            backend_ids=args.backend,
+            replay=args.replay,
+            today=args.today,
+            out_path=args.out,
+            json_output=args.json,
         )
     if args.command == "audit-summary":
         print(stable_json_dumps(summarize_audit_run(args.path)))
@@ -2297,6 +2334,45 @@ def _run_audit_migrate(
         return 2
     print(stable_json_dumps({"ok": True, "migration": audit_migration_report_to_jsonable(report)}))
     return 0
+
+
+def _run_model_preflight(
+    *,
+    mode: str,
+    backend_ids: list[str],
+    replay: Path | None,
+    today: str | None,
+    out_path: Path | None,
+    json_output: bool,
+) -> int:
+    try:
+        report = evaluate_model_backend_preflight(
+            mode=mode,
+            backend_ids=backend_ids,
+            env=os.environ,
+            replay_path=replay,
+            today=today,
+        )
+        payload: dict[str, object] = model_backend_preflight_report_to_jsonable(report)
+        ok = report.ok
+    except (OSError, ModelBackendPreflightError) as exc:
+        payload = {
+            "schema_version": "1.0",
+            "ok": False,
+            "mode": mode,
+            "error": str(exc),
+            "reproduction_claimed": False,
+            "boundary": MODEL_BACKEND_PREFLIGHT_BOUNDARY,
+        }
+        ok = False
+
+    output = stable_json_dumps(payload) + "\n"
+    if out_path is not None:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(output, encoding="utf-8")
+    if json_output or out_path is None:
+        print(output, end="")
+    return 0 if ok else 2
 
 
 def _run_audit_verify(
