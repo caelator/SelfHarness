@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from self_harness.adapters.agentic.tools import (
+    DEFAULT_TOOL_TIMEOUT_SECONDS,
+    execute_tool,
+    tool_schemas,
+)
+from self_harness.adapters.llm.messages import DEFAULT_MAX_TOKENS, MessagesTransport
+from self_harness.exceptions import LLMClientError
+from self_harness.types import TraceEvent
+
+DEFAULT_MAX_STEPS = 12
+
+
+@dataclass
+class AgentLoopResult:
+    """The outcome of running the agentic loop for one task attempt."""
+
+    stop_reason: str
+    steps: int
+    tool_calls: int
+    final_text: str
+    trace: list[TraceEvent] = field(default_factory=list)
+    usage: dict[str, int] = field(default_factory=dict)
+    error: str | None = None
+
+
+def run_agent_loop(
+    *,
+    transport: MessagesTransport,
+    system_prompt: str,
+    task_prompt: str,
+    workdir: Path,
+    env: dict[str, str],
+    max_steps: int = DEFAULT_MAX_STEPS,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
+) -> AgentLoopResult:
+    """Drive a tool-calling agent until it stops, hits the step budget, or errors.
+
+    The model acts in ``workdir`` using the bash/read_file/write_file tools. Every model turn and
+    tool execution is recorded as a stable :class:`TraceEvent` so downstream clustering has
+    low-cardinality, informative symptoms. The loop never raises on tool errors — those are fed back
+    to the model as ``tool_result`` blocks with ``is_error`` so it can recover.
+    """
+
+    tools = tool_schemas()
+    messages: list[dict[str, Any]] = [{"role": "user", "content": task_prompt}]
+    trace: list[TraceEvent] = []
+    usage_totals: dict[str, int] = {}
+    tool_calls = 0
+
+    for step in range(max_steps):
+        try:
+            turn = transport.create_message(
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+            )
+        except LLMClientError as exc:
+            trace.append(TraceEvent(kind="model_error", message="model request failed"))
+            return AgentLoopResult(
+                stop_reason="model_error",
+                steps=step,
+                tool_calls=tool_calls,
+                final_text="",
+                trace=trace,
+                usage=usage_totals,
+                error=str(exc),
+            )
+
+        _accumulate(usage_totals, turn.usage)
+        text = turn.text().strip()
+        tool_uses = turn.tool_uses()
+        trace.append(
+            TraceEvent(
+                kind="model_turn",
+                message=f"model turn stop_reason={turn.stop_reason} tool_calls={len(tool_uses)}",
+            )
+        )
+
+        # Record the assistant turn verbatim so tool_use ids round-trip correctly.
+        messages.append({"role": "assistant", "content": turn.content})
+
+        if turn.stop_reason != "tool_use" or not tool_uses:
+            return AgentLoopResult(
+                stop_reason=turn.stop_reason,
+                steps=step + 1,
+                tool_calls=tool_calls,
+                final_text=text,
+                trace=trace,
+                usage=usage_totals,
+            )
+
+        tool_results: list[dict[str, Any]] = []
+        for tool_use in tool_uses:
+            tool_calls += 1
+            name = str(tool_use.get("name", ""))
+            tool_input = tool_use.get("input")
+            tool_input_map: Mapping[str, Any] = tool_input if isinstance(tool_input, Mapping) else {}
+            result = execute_tool(
+                name,
+                tool_input_map,
+                workdir=workdir,
+                env=env,
+                timeout_seconds=tool_timeout_seconds,
+            )
+            trace.append(
+                TraceEvent(
+                    kind="tool_call",
+                    message=f"tool {name} {'error' if result.is_error else 'ok'}",
+                )
+            )
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use.get("id"),
+                    "content": result.output,
+                    "is_error": result.is_error,
+                }
+            )
+        messages.append({"role": "user", "content": tool_results})
+
+    trace.append(TraceEvent(kind="budget", message="reached max agent steps"))
+    return AgentLoopResult(
+        stop_reason="max_steps",
+        steps=max_steps,
+        tool_calls=tool_calls,
+        final_text="",
+        trace=trace,
+        usage=usage_totals,
+    )
+
+
+def _accumulate(totals: dict[str, int], counts: Mapping[str, int]) -> None:
+    for key, value in counts.items():
+        if isinstance(value, int):
+            totals[key] = totals.get(key, 0) + value

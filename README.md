@@ -594,6 +594,28 @@ subscription works without prepaid API balance. Set
 `ZAI_BASE_URL=https://api.z.ai/api/paas/v4` to use the pay-as-you-go
 OpenAI-compatible endpoint instead. See `docs/operations/web_interface.md`.
 
+## Agentic Runner (real GLM 5.2 task solving)
+
+`self-harness glm-agentic-demo` runs the loop with a **real agentic runner**:
+GLM 5.2 solves each task as a tool-using agent (bash/read_file/write_file) under
+the candidate harness, in an isolated workspace, and the **Codex CLI** judges
+success. Harness edits therefore change genuine task-success rates — this is the
+paper's real experiment, not a string-matching oracle.
+
+```bash
+export ZAI_API_KEY="<z.ai coding-plan key>"   # GLM 5.2 solver + proposer
+# requires the Codex CLI on PATH (codex login) as the judge
+self-harness glm-agentic-demo examples/agentic_corpus.json \
+  --proposer glm --rounds 2 --max-steps 12 --out runs/glm-agentic
+```
+
+> The agent executes model-generated shell commands **directly on the host**
+> (no container). Run only with trusted corpora. Outcomes are stochastic, so
+> agentic-runner audits are not byte-reproducible — unlike the deterministic
+> `demo`/`python-demo` runners. It is real agentic evaluation, and is **not** a
+> Terminal-Bench reproduction (different task set, no Harbor). Full details:
+> `docs/operations/agentic_runner.md`.
+
 ## Operator Console
 
 `self-harness ui` serves a single-page operator console (stdlib HTTP server,

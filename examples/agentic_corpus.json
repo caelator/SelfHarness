@@ -1,0 +1,69 @@
+{
+  "corpus_version": "1",
+  "corpus_id": "agentic-coding-smoke",
+  "tasks": [
+    {
+      "id": "fizzbuzz-script",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Implement FizzBuzz as a runnable Python script.",
+      "metadata": {
+        "instructions": "Create a file named fizzbuzz.py in the current directory. Running `python3 fizzbuzz.py` must print the numbers 1 through 15, one per line, but print 'Fizz' for multiples of 3, 'Buzz' for multiples of 5, and 'FizzBuzz' for multiples of 15.",
+        "success_criteria": "fizzbuzz.py exists and `python3 fizzbuzz.py` prints exactly: 1, 2, Fizz, 4, Buzz, Fizz, 7, 8, Fizz, Buzz, 11, Fizz, 13, 14, FizzBuzz (each on its own line)."
+      }
+    },
+    {
+      "id": "word-count-answer",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Count words in a provided text file and write the count to answer.txt.",
+      "metadata": {
+        "instructions": "The file input.txt in the current directory contains some text. Count the total number of whitespace-separated words in it and write ONLY that integer (no other text) to a new file named answer.txt.",
+        "success_criteria": "answer.txt exists and contains exactly the integer word count of input.txt (whitespace-separated tokens) and nothing else.",
+        "workspace_files": {
+          "input.txt": "the quick brown fox jumps over the lazy dog\n"
+        }
+      }
+    },
+    {
+      "id": "fix-syntax-error",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Fix a Python script that has a bug so its test passes.",
+      "metadata": {
+        "instructions": "The file calc.py defines a function add(a, b) that is supposed to return the sum of a and b, but it is buggy. Fix calc.py so that `python3 test_calc.py` exits successfully and prints 'ok'.",
+        "success_criteria": "Running `python3 test_calc.py` exits with code 0 and prints 'ok'; calc.py's add function returns a + b.",
+        "workspace_files": {
+          "calc.py": "def add(a, b):\n    return a - b\n",
+          "test_calc.py": "from calc import add\nassert add(2, 3) == 5, 'add is broken'\nassert add(10, 5) == 15\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "json-extract",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Extract a value from a JSON file and write it to a result file.",
+      "metadata": {
+        "instructions": "The file data.json contains a JSON object with a 'name' field. Write the value of that 'name' field (the string only) to a file named result.txt.",
+        "success_criteria": "result.txt exists and contains exactly the string value of the 'name' field in data.json with no quotes or extra whitespace.",
+        "workspace_files": {
+          "data.json": "{\"name\": \"selfharness\", \"version\": 2}\n"
+        }
+      }
+    },
+    {
+      "id": "reverse-lines",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Reverse the order of lines in a file.",
+      "metadata": {
+        "instructions": "The file lines.txt contains several lines of text. Create a file named reversed.txt that contains the same lines in reverse order (last line first).",
+        "success_criteria": "reversed.txt exists and contains the lines of lines.txt in reverse order.",
+        "workspace_files": {
+          "lines.txt": "alpha\nbeta\ngamma\n"
+        }
+      }
+    }
+  ]
+}

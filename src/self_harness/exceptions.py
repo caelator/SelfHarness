@@ -71,3 +71,11 @@ class CorpusSigningError(SelfHarnessError, RuntimeError):
 
 class KeyringError(SelfHarnessError, RuntimeError):
     """Raised when a corpus trust keyring is invalid or cannot be updated."""
+
+
+class AgenticRunnerError(SelfHarnessError, RuntimeError):
+    """Raised when the agentic task runner or its tool-calling loop fails."""
+
+
+class CodexVerifierError(SelfHarnessError, RuntimeError):
+    """Raised when the Codex CLI judge cannot be invoked or its output cannot be parsed."""

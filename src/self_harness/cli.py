@@ -337,6 +337,33 @@ def main(argv: list[str] | None = None) -> int:
         help="corpus keyring JSON required to verify the corpus signature against active trusted keys",
     )
 
+    glm_agentic_parser = subparsers.add_parser(
+        "glm-agentic-demo",
+        help="run GLM 5.2 as a real tool-using agent, judged by the Codex CLI; NOT a benchmark reproduction",
+    )
+    glm_agentic_parser.add_argument("corpus", type=Path)
+    glm_agentic_parser.add_argument(
+        "--proposer",
+        choices=("heuristic", "glm"),
+        default="glm",
+        help="harness-edit proposer; glm uses GLM 5.2 for both solving and proposing (within-model)",
+    )
+    glm_agentic_parser.add_argument("--rounds", type=int, default=2)
+    glm_agentic_parser.add_argument("--seed", type=int, default=0)
+    glm_agentic_parser.add_argument("--out", type=Path, default=Path("runs/glm-agentic-demo"))
+    glm_agentic_parser.add_argument("--evaluation-repeats", type=int, default=1)
+    glm_agentic_parser.add_argument("--max-proposals", type=int, default=8)
+    glm_agentic_parser.add_argument("--max-payload-bytes", type=int, default=600)
+    glm_agentic_parser.add_argument(
+        "--max-steps", type=int, default=12, help="max agent tool-calling steps per attempt"
+    )
+    glm_agentic_parser.add_argument("--tool-timeout-seconds", type=int, default=30)
+    glm_agentic_parser.add_argument("--codex-binary", default="codex", help="Codex CLI binary used as the judge")
+    glm_agentic_parser.add_argument("--keep-workdir", action="store_true")
+    glm_agentic_trust_group = glm_agentic_parser.add_mutually_exclusive_group()
+    glm_agentic_trust_group.add_argument("--require-corpus-signature", type=Path)
+    glm_agentic_trust_group.add_argument("--require-corpus-keyring", type=Path)
+
     http_parser = subparsers.add_parser(
         "http-demo",
         help="run trusted HTTP verifier tasks; not a benchmark reproduction",
@@ -901,6 +928,23 @@ def main(argv: list[str] | None = None) -> int:
             signature_key=args.require_corpus_signature,
             keyring_path=args.require_corpus_keyring,
         )
+    if args.command == "glm-agentic-demo":
+        return _run_glm_agentic_demo(
+            corpus_path=args.corpus,
+            proposer_mode=args.proposer,
+            rounds=args.rounds,
+            seed=args.seed,
+            out_dir=args.out,
+            evaluation_repeats=args.evaluation_repeats,
+            max_proposals=args.max_proposals,
+            max_payload_bytes=args.max_payload_bytes,
+            max_steps=args.max_steps,
+            tool_timeout_seconds=args.tool_timeout_seconds,
+            codex_binary=args.codex_binary,
+            keep_workdir=args.keep_workdir,
+            signature_key=args.require_corpus_signature,
+            keyring_path=args.require_corpus_keyring,
+        )
     if args.command == "http-demo":
         return _run_http_demo(
             corpus_path=args.corpus,
@@ -1279,6 +1323,95 @@ def _run_python_demo(
         return 2
 
     print("Self-Harness trusted in-process Python verifier demo complete")
+    print("This is not a benchmark reproduction.")
+    _print_summaries(summaries)
+    print(f"Artifacts: {out_dir}")
+    return 0
+
+
+def _run_glm_agentic_demo(
+    *,
+    corpus_path: Path,
+    proposer_mode: str,
+    rounds: int,
+    seed: int,
+    out_dir: Path,
+    evaluation_repeats: int,
+    max_proposals: int,
+    max_payload_bytes: int,
+    max_steps: int,
+    tool_timeout_seconds: int,
+    codex_binary: str,
+    keep_workdir: bool,
+    signature_key: Path | None,
+    keyring_path: Path | None,
+) -> int:
+    from self_harness.adapters.agentic.runner import AGENTIC_MODEL_ID, GLMAgenticTaskAdapter
+    from self_harness.adapters.llm.paper_models import GLMClient
+    from self_harness.exceptions import AgenticRunnerError, LLMClientError
+    from self_harness.llm_proposer import LLMProposer
+    from self_harness.model_backend_preflight import build_zai_transport
+
+    api_key = os.environ.get("ZAI_API_KEY")
+    if not api_key:
+        print(stable_json_dumps({"ok": False, "reason": "missing-credentials", "message": "set ZAI_API_KEY"}))
+        return 2
+    base_url = os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/anthropic")
+
+    config = EngineConfig(
+        rounds=rounds,
+        seed=seed,
+        evaluation_repeats=evaluation_repeats,
+        proposal_budget=ProposalBudget(max_proposals=max_proposals, max_payload_bytes=max_payload_bytes),
+        model_id=AGENTIC_MODEL_ID,
+        schema_version="1.4",
+    )
+    adapter = GLMAgenticTaskAdapter(
+        api_key=api_key,
+        base_url=base_url,
+        max_steps=max_steps,
+        tool_timeout_seconds=tool_timeout_seconds,
+        codex_binary=codex_binary,
+        keep_workdir=keep_workdir,
+    )
+    try:
+        corpus, _trusted_entry = _load_trusted_corpus(
+            corpus_path,
+            allow_legacy=False,
+            signature_key=signature_key,
+            keyring_path=keyring_path,
+        )
+        runner = adapter.runner()
+    except (AgenticRunnerError, KeyringError, TaskLoadError) as exc:
+        reason = "invalid-runner" if isinstance(exc, AgenticRunnerError) else _trust_error_payload(exc)["reason"]
+        print(stable_json_dumps({"ok": False, "reason": reason, "message": str(exc)}))
+        return 2
+
+    if proposer_mode == "glm":
+        try:
+            transport = build_zai_transport(base_url=base_url, api_key=api_key)
+        except LLMClientError as exc:
+            print(stable_json_dumps({"ok": False, "reason": "invalid-runner", "message": str(exc)}))
+            return 2
+        proposer: HeuristicProposer | LLMProposer = LLMProposer(
+            GLMClient(transport=transport, max_tokens=4096, temperature=0.0)
+        )
+    else:
+        proposer = HeuristicProposer()
+
+    print("WARNING: glm-agentic-demo executes model-generated commands on this host (no container).")
+    print("Run only trusted corpora. This is real agentic evaluation, NOT a Terminal-Bench reproduction.")
+
+    engine = SelfHarnessEngine(
+        tasks=adapter.load(corpus),
+        runner=runner,
+        proposer=proposer,
+        out_dir=out_dir,
+        config=config,
+    )
+    summaries = engine.run()
+
+    print("Self-Harness GLM 5.2 agentic demo complete")
     print("This is not a benchmark reproduction.")
     _print_summaries(summaries)
     print(f"Artifacts: {out_dir}")
