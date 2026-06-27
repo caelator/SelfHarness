@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from self_harness.harness import (
     apply_patch,
     dump_harness_spec,
@@ -136,3 +138,30 @@ def test_render_initial_harness_source_reparses_to_same_spec() -> None:
     exec(preamble + body, namespace)  # noqa: S102 - exercising the generated source on purpose
     rebuilt = namespace["initial_harness"]()  # type: ignore[operator]
     assert dump_harness_spec(rebuilt) == dump_harness_spec(evolved)
+
+
+def test_render_initial_harness_source_passes_ruff_with_long_surface(tmp_path: Path) -> None:
+    # An evolved surface is arbitrary-length prose; the rendered repr line routinely exceeds 120 chars.
+    # The promote-to-source gate runs ruff, so every field line must carry noqa or the gate fails (which
+    # is exactly what blocked a real auto-promotion until the renderer was fixed).
+    import subprocess
+    import sys
+
+    spec = initial_harness()
+    long_text = (
+        "Before concluding, verify the result with the most targeted command. "
+        "When writing a single-value answer to a file (e.g. answer.txt, sum.txt), use printf '%s' "
+        "instead of echo to avoid trailing newlines; confirm with xxd <file> | tail -1."
+    )
+    patch = HarnessPatch([HarnessOp("AppendToSurface", "verification", long_text)])
+    evolved, _ = apply_patch(spec, patch)
+
+    module = tmp_path / "rendered_harness.py"
+    body = render_initial_harness_source(evolved)
+    module.write_text("from self_harness.types import HarnessSpec\n\n\n" + body + "\n", encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "ruff", "check", "--select", "E501", str(module)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, f"ruff E501 failed on rendered harness:\n{result.stdout}\n{result.stderr}"

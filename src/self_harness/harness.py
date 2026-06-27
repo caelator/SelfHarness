@@ -76,21 +76,25 @@ def render_initial_harness_source(spec: HarnessSpec) -> str:
     """
 
     surfaces = dump_harness_spec(spec)
+    # Evolved surfaces are arbitrary-length prose, so repr lines routinely exceed the 120-char limit.
+    # Tag every field line with noqa so a faithfully-rendered harness always passes the promote gate's
+    # ruff check (the content is data, not hand-maintained code).
+    nq = "  # noqa: E501"
     lines = [
         INITIAL_HARNESS_START_MARKER,
         "def initial_harness() -> HarnessSpec:",
         "    # Promoted from an evolved Self-Harness lineage via the operator console (promote-to-source).",
         "    return HarnessSpec(",
-        f"        system_prompt={surfaces['system_prompt']!r},",
-        f"        bootstrap={surfaces['bootstrap']!r},",
-        f"        execution={surfaces['execution']!r},",
-        f"        verification={surfaces['verification']!r},",
-        f"        failure_recovery={surfaces['failure_recovery']!r},",
-        f"        runtime_policy={surfaces['runtime_policy']!r},",
-        f"        tools={surfaces['tools']!r},",
-        f"        skills={surfaces['skills']!r},",
-        f"        memory_sources={surfaces['memory_sources']!r},",
-        f"        subagents={surfaces['subagents']!r},",
+        f"        system_prompt={surfaces['system_prompt']!r},{nq}",
+        f"        bootstrap={surfaces['bootstrap']!r},{nq}",
+        f"        execution={surfaces['execution']!r},{nq}",
+        f"        verification={surfaces['verification']!r},{nq}",
+        f"        failure_recovery={surfaces['failure_recovery']!r},{nq}",
+        f"        runtime_policy={surfaces['runtime_policy']!r},{nq}",
+        f"        tools={surfaces['tools']!r},{nq}",
+        f"        skills={surfaces['skills']!r},{nq}",
+        f"        memory_sources={surfaces['memory_sources']!r},{nq}",
+        f"        subagents={surfaces['subagents']!r},{nq}",
         "    )",
         INITIAL_HARNESS_END_MARKER,
     ]
