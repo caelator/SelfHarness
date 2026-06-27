@@ -1397,10 +1397,10 @@ _HTML = r"""<!doctype html>
       </section>
 
       <section class="card">
-        <div class="card-h"><h2>Runs</h2><span class="spacer"></span><span class="muted" x-text="runs.length + ' total'"></span></div>
+        <div class="card-h"><h2>Runs</h2><span class="spacer"></span><label class="muted" style="font-size:12px; display:flex; align-items:center; gap:5px; cursor:pointer;"><input type="checkbox" x-model="onlyEdits"> edits only</label><span class="muted" style="margin-left:10px;" x-text="visibleRuns().length + (onlyEdits ? ' with edits' : ' total')"></span></div>
         <div class="card-b">
           <div class="runs">
-            <template x-for="r in runs" :key="r.id">
+            <template x-for="r in visibleRuns()" :key="r.id">
               <div class="run-row" :class="{sel: selectedId===r.id}" @click="select(r.id)">
                 <div style="flex:1">
                   <div class="id mono" x-text="r.id"></div>
@@ -1409,7 +1409,7 @@ _HTML = r"""<!doctype html>
                 <span class="badge" :class="runBadgeClass(r)" x-text="runBadge(r)"></span>
               </div>
             </template>
-            <div class="empty" x-show="runs.length===0">No runs yet. Start one above.</div>
+            <div class="empty" x-show="visibleRuns().length===0" x-text="onlyEdits ? 'No runs promoted an edit yet.' : 'No runs yet. Start one above.'"></div>
           </div>
           <div x-show="jobs.length" style="margin-top:12px;">
             <div class="muted" style="font-size:12px; margin-bottom:6px;">Active jobs</div>
@@ -1652,7 +1652,7 @@ _HTML = r"""<!doctype html>
         glm: { status: 'not_checked', detail: '', key_present: false, mode: 'dry-run' },
         serverProposer: 'heuristic',
         runs: [], jobs: [], selectedId: null, detail: null, roundData: null, harnessData: null,
-        tab: 'overview', view: 'runs', starting: false, toast: '',
+        tab: 'overview', view: 'runs', starting: false, toast: '', onlyEdits: false,
         harnessState: { evolving: false, source_run: null, harness_hash: null },
         autoPromote: true, seenPromotions: {},
         form: { evolve: true, rounds: 3, seed: 0, evaluation_repeats: 2, max_proposals: 8, max_payload_bytes: 600 },
@@ -1774,19 +1774,30 @@ _HTML = r"""<!doctype html>
         },
         pct(x) { return (x == null) ? '—' : (Math.round(x * 1000) / 10) + '%'; },
         deltaTxt(d) { return d > 0 ? '+' + d : '' + d; },
+        visibleRuns() {
+          if (!this.onlyEdits) return this.runs;
+          return this.runs.filter(r => ((r.summary || {}).accepted_count || 0) > 0);
+        },
         runScore(r) {
           const s = r.summary || {};
           if (r.status === 'running' || r.status === 'queued') return r.status + '…';
           if (s.final_held_in_score == null) return r.error ? 'audit error' : 'pending';
-          return 'in ' + this.pct(s.final_held_in_score) + ' · out ' + this.pct(s.final_held_out_score);
+          const base = 'in ' + this.pct(s.final_held_in_score) + ' · out ' + this.pct(s.final_held_out_score);
+          const a = s.accepted_count || 0, rj = s.rejected_count || 0;
+          if (a || rj) return base + ' · ' + a + ' accepted / ' + rj + ' rejected';
+          return base + ' · no edits';
         },
         runBadge(r) {
           if (r.status === 'running' || r.status === 'queued') return r.status;
-          return r.error ? 'error' : 'audit';
+          if (r.error) return 'error';
+          const a = (r.summary || {}).accepted_count || 0;
+          return a > 0 ? ('+' + a + ' edit' + (a === 1 ? '' : 's')) : 'no change';
         },
         runBadgeClass(r) {
           if (r.status === 'running' || r.status === 'queued') return 'superseded';
-          return r.error ? 'rejected' : 'accepted';
+          if (r.error) return 'rejected';
+          const a = (r.summary || {}).accepted_count || 0;
+          return a > 0 ? 'accepted' : 'superseded';
         },
         barPct(row) { const t = (row.after_held_in_passed||0) + (row.after_held_out_passed||0); return Math.min(100, t * 8); },
         acceptedIn(row) { return (row.after_held_in_passed > row.baseline_held_in_passed) || (row.after_held_out_passed > row.baseline_held_out_passed); },
