@@ -24,6 +24,35 @@ def test_ui_state_lists_completed_runs(tmp_path: Path) -> None:
     assert detail["summary"]["final_held_out_score"] == 1.0
     assert detail["trajectory"][0]["after_held_in_passed"] == 4
     assert "bootstrap" in detail["inspection"]["final_harness_surfaces"]
+    assert detail["incomplete"] is False
+
+
+def test_ui_run_detail_of_in_progress_run_is_partial_not_error(tmp_path: Path) -> None:
+    # A run that has a manifest but no lineage.json yet (still running) must NOT make run_detail throw;
+    # the console auto-selects the newest run and would otherwise show "load failed: missing audit
+    # artifact". It should return a partial detail flagged incomplete instead.
+    from self_harness.ui import UiJob
+
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    run_id = "ui-inprogress-0000"
+    run_path = app.runs_dir / run_id
+    (run_path / "rounds" / "0").mkdir(parents=True)
+    (run_path / "manifest.json").write_text("{}", encoding="utf-8")
+    app._jobs["job-x"] = UiJob(
+        id="job-x",
+        run_id=run_id,
+        path=run_path,
+        status="running",
+        config={},
+        created_at="2026-06-27T00:00:00Z",
+    )
+
+    detail = app.run_detail(run_id)
+    assert detail["incomplete"] is True
+    assert detail["status"] == "running"
+    assert detail["summary"] is None
+    assert detail["error"] is None  # not surfaced as an error while the job is still running
+    assert detail["trajectory"] == []
 
 
 def test_ui_state_reports_glm_proposer_mode(tmp_path: Path) -> None:

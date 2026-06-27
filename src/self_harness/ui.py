@@ -161,9 +161,33 @@ class HarnessUiApp:
 
     def run_detail(self, run_id: str) -> dict[str, Any]:
         path = self._run_path(run_id)
-        summary = to_jsonable(summarize_audit_run(path))
-        trajectory = audit_trajectory_rows(path)
-        inspection = to_jsonable(inspect_harness_run(path))
+        with self._lock:
+            job_status = next(
+                (job.status for job in self._jobs.values() if job.run_id == run_id),
+                None,
+            )
+        try:
+            summary = to_jsonable(summarize_audit_run(path))
+            trajectory = audit_trajectory_rows(path)
+            inspection = to_jsonable(inspect_harness_run(path))
+        except Exception as exc:
+            # A run still being produced hasn't written lineage.json/round artifacts yet. Surface a
+            # partial, non-error detail (status: running) instead of failing the whole console load, so
+            # selecting an in-progress agentic run shows "running" rather than "load failed".
+            incomplete = job_status in {"queued", "running"}
+            return {
+                "schema_version": UI_SCHEMA_VERSION,
+                "id": path.name,
+                "path": str(path),
+                "summary": None,
+                "trajectory": [],
+                "inspection": None,
+                "token_usage": self._usage_for_run(run_id),
+                "status": job_status,
+                "incomplete": True,
+                "error": None if incomplete else str(exc),
+                "reproduction_claimed": False,
+            }
         return {
             "schema_version": UI_SCHEMA_VERSION,
             "id": path.name,
@@ -172,6 +196,9 @@ class HarnessUiApp:
             "trajectory": trajectory,
             "inspection": inspection,
             "token_usage": self._usage_for_run(run_id),
+            "status": job_status,
+            "incomplete": False,
+            "error": None,
             "reproduction_claimed": False,
         }
 
@@ -419,6 +446,7 @@ class HarnessUiApp:
             config = dict(job.config)
             path = job.path
             run_mode = job.run_mode
+        _log(f"run {job.run_id} started ({run_mode}, rounds={config.get('rounds')}, evolve={evolve})")
         try:
             usage_lock = self._lock
 
@@ -449,6 +477,16 @@ class HarnessUiApp:
                 job.summary = summary
                 job.source_promotion = promotion
                 job.events.append("completed")
+            _log(
+                f"run {job.run_id} completed: held-in {summary.get('final_held_in_score')} "
+                f"held-out {summary.get('final_held_out_score')} "
+                f"accepted {summary.get('accepted_count')}/{summary.get('rejected_count')} rejected"
+            )
+            if promotion is not None:
+                if promotion.get("applied"):
+                    _log(f"run {job.run_id}: reviewer-approved edit integrated into harness.py (gate passed)")
+                elif promotion.get("ok") is False:
+                    _log(f"run {job.run_id}: auto-integration skipped — {promotion.get('message')}")
         except Exception as exc:
             with self._lock:
                 job = self._jobs[job_id]
@@ -456,6 +494,7 @@ class HarnessUiApp:
                 job.ended_at = _now()
                 job.error = str(exc)
                 job.events.append("failed")
+            _log(f"run {job.run_id} FAILED: {exc}")
 
     def _build_engine(
         self,
@@ -845,8 +884,13 @@ def _make_handler(app: HarnessUiApp) -> type[BaseHTTPRequestHandler]:
                 self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
 
         def log_message(self, format: str, *args: Any) -> None:
+            # Quiet the high-frequency console polling so the window shows meaningful activity (runs,
+            # dev-tasks, chat, promotions) rather than a flood of /api/state + /api/preflight GETs.
+            message = format % args
+            if any(noisy in message for noisy in ('GET /api/state', 'GET /api/preflight', 'GET /static/')):
+                return
             timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-            print(f"{timestamp} {self.address_string()} {format % args}")
+            print(f"{timestamp} {self.address_string()} {message}")
 
         def _read_json(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0"))
@@ -1141,6 +1185,12 @@ def _timestamp(value: float) -> str:
 
 def _now() -> str:
     return _timestamp(time.time())
+
+
+def _log(message: str) -> None:
+    """Emit a concise lifecycle line to the console window so an operator can follow activity live."""
+
+    print(f"{_now()} [run] {message}", flush=True)
 
 
 _HTML = r"""<!doctype html>
@@ -1462,7 +1512,19 @@ _HTML = r"""<!doctype html>
 
         <!-- Overview -->
         <div x-show="selectedId && tab==='overview'">
-          <template x-if="detail">
+          <template x-if="detail && detail.incomplete">
+            <div class="box" style="padding:16px;">
+              <div style="font-weight:600;" x-text="detail.status === 'failed' ? 'Run failed' : 'Run in progress…'"></div>
+              <p class="muted" style="font-size:13px; margin:8px 0 0;" x-show="detail.status === 'queued' || detail.status === 'running'">GLM 5.2 is solving the task corpus and Codex is judging each result. Audit artifacts (scores, trajectory, harness diff) appear here once the run completes. This view refreshes automatically.</p>
+              <p class="muted" style="font-size:13px; margin:8px 0 0; color:var(--danger);" x-show="detail.error" x-text="detail.error"></p>
+              <div class="scores" style="margin-top:12px" x-show="hasUsage()">
+                <div class="stat"><div class="k">GLM input tokens</div><div class="v" x-text="(detail.token_usage.input_tokens||0).toLocaleString()"></div></div>
+                <div class="stat"><div class="k">GLM output tokens</div><div class="v" x-text="(detail.token_usage.output_tokens||0).toLocaleString()"></div></div>
+                <div class="stat"><div class="k">GLM total tokens</div><div class="v" x-text="(detail.token_usage.total_tokens||0).toLocaleString()"></div></div>
+              </div>
+            </div>
+          </template>
+          <template x-if="detail && detail.summary && !detail.incomplete">
             <div>
               <div class="scores">
                 <div class="stat"><div class="k">Held-in (final)</div><div class="v" x-text="pct(detail.summary.final_held_in_score)"></div></div>
