@@ -31,6 +31,14 @@ The console has three top-level views — **Runs**, **Dev task**, and **Chat**:
    - **Harness lineage** — *evolve from persisted* (default) starts each run from
      the last promoted harness so the harness improves across runs/sessions;
      **Reset** discards the lineage back to `initial_harness()` (Figure 3).
+   - **Continuous self-improvement** — *Start continuous loop* launches evolving
+     runs back-to-back until you stop it. Each iteration starts from the persisted
+     best-so-far harness and only promotes non-regressing edits (the acceptance gate
+     `Δin≥0 ∧ Δho≥0 ∧ max(Δin,Δho)>0`), so the lineage improves **monotonically** —
+     it can never get worse. Live stats show runs completed, edits promoted, and the
+     last outcome; *Stop* halts gracefully after the current run finishes. Backed by
+     `POST /api/autoloop/start` and `POST /api/autoloop/stop`; status is in
+     `GET /api/state` under `autoloop`.
 2. **Overview** — final held-in/held-out pass rates, accept/reject counts, GLM
    token usage.
 3. **Trajectory** — per-round step view with deltas and accept/merge/carry badges.
@@ -92,6 +100,8 @@ POST /api/runs                        start a run (engine knobs + run_mode + evo
 POST /api/dev-task                    GLM solves one described task; Codex judges
 POST /api/chat                        single-shot GLM 5.2 chat with history
 POST /api/harness/reset               discard the evolving harness lineage
+POST /api/autoloop/start              start the continuous self-improvement loop (evolving runs back-to-back)
+POST /api/autoloop/stop               stop the loop gracefully after the current run
 POST /api/runs/<id>/promote-to-source render/diff (and apply by default; pass {"apply": false} for a preview)
 ```
 

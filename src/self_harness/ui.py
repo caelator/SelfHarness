@@ -127,6 +127,21 @@ class HarnessUiApp:
         self.auto_promote_to_source = auto_promote_to_source
         self._lock = threading.Lock()
         self._jobs: dict[str, UiJob] = {}
+        # Continuous self-improvement loop: a controller thread that launches runs back-to-back, each
+        # starting from the persisted best-so-far harness. The acceptance gate only promotes
+        # non-regressions (Δin≥0 ∧ Δho≥0 ∧ max>0), so the lineage improves monotonically.
+        self._autoloop: dict[str, Any] = {
+            "active": False,
+            "runs_completed": 0,
+            "edits_promoted": 0,
+            "last_run_id": None,
+            "last_outcome": None,
+            "started_at": None,
+            "config": None,
+            "error": None,
+        }
+        self._autoloop_thread: threading.Thread | None = None
+        self._autoloop_stop = threading.Event()
 
     def state(self) -> dict[str, Any]:
         with self._lock:
@@ -142,6 +157,7 @@ class HarnessUiApp:
             "model": "glm-5.2" if self.proposer_mode == "glm" else None,
             "harness_state": self._harness_state_status(),
             "auto_promote_to_source": self.auto_promote_to_source,
+            "autoloop": dict(self._autoloop),
             "reproduction_claimed": False,
         }
 
@@ -404,6 +420,22 @@ class HarnessUiApp:
 
 
     def start_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        job, evolve = self._make_job(payload)
+        with self._lock:
+            self._jobs[job.id] = job
+        thread = threading.Thread(
+            target=self._run_job,
+            args=(job.id,),
+            kwargs={"evolve": evolve},
+            name=f"self-harness-ui-{job.run_id}",
+            daemon=True,
+        )
+        thread.start()
+        return _job_to_jsonable(job)
+
+    def _make_job(self, payload: dict[str, Any]) -> tuple[UiJob, bool]:
+        """Build a queued UiJob from a run payload. Shared by start_run and the autoloop controller."""
+
         config = {
             "rounds": _int_payload(payload, "rounds", default=3, minimum=1, maximum=20),
             "seed": _int_payload(payload, "seed", default=0, minimum=0, maximum=1_000_000),
@@ -425,17 +457,86 @@ class HarnessUiApp:
             proposer_mode=self.proposer_mode,
             run_mode=run_mode,
         )
+        return job, evolve
+
+    def start_autoloop(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Start the continuous self-improvement loop: launch evolving runs back-to-back until stopped.
+
+        Each iteration starts from the persisted best-so-far harness and only promotes non-regressing
+        edits, so the lineage improves monotonically. ``evolve`` is forced on (a non-evolving loop would
+        never accumulate). Runs forever until ``stop_autoloop`` is called.
+        """
+
         with self._lock:
-            self._jobs[job.id] = job
-        thread = threading.Thread(
-            target=self._run_job,
-            args=(job.id,),
-            kwargs={"evolve": evolve},
-            name=f"self-harness-ui-{run_id}",
-            daemon=True,
-        )
-        thread.start()
-        return _job_to_jsonable(job)
+            if self._autoloop["active"]:
+                return {"schema_version": UI_SCHEMA_VERSION, "ok": False, "message": "autoloop already running", "autoloop": dict(self._autoloop)}
+            # Validate the run config once up front; reuse it for every iteration.
+            template = dict(payload)
+            template["evolve"] = True
+            template.setdefault("run_mode", "agentic")
+            self._make_job(template)  # raises on invalid config before we claim "active"
+            self._autoloop.update(
+                active=True,
+                runs_completed=0,
+                edits_promoted=0,
+                last_run_id=None,
+                last_outcome=None,
+                started_at=_now(),
+                config={k: template[k] for k in template if k != "evolve"},
+                error=None,
+            )
+            self._autoloop_stop.clear()
+            self._autoloop_thread = threading.Thread(
+                target=self._autoloop_run,
+                args=(template,),
+                name="self-harness-autoloop",
+                daemon=True,
+            )
+            self._autoloop_thread.start()
+        _log("autoloop started — continuous self-improvement engaged")
+        return {"schema_version": UI_SCHEMA_VERSION, "ok": True, "message": "autoloop started", "autoloop": dict(self._autoloop)}
+
+    def stop_autoloop(self) -> dict[str, Any]:
+        """Signal the loop to stop after the current run finishes."""
+
+        with self._lock:
+            was_active = self._autoloop["active"]
+        self._autoloop_stop.set()
+        if was_active:
+            _log("autoloop stop requested — will halt after the current run")
+        return {"schema_version": UI_SCHEMA_VERSION, "ok": True, "message": "autoloop stopping" if was_active else "autoloop not running", "autoloop": dict(self._autoloop)}
+
+    def _autoloop_run(self, template: dict[str, Any]) -> None:
+        try:
+            while not self._autoloop_stop.is_set():
+                job, evolve = self._make_job(template)
+                with self._lock:
+                    self._jobs[job.id] = job
+                # Run inline (not a new thread) so iterations are strictly sequential — each run starts
+                # from the harness the previous run promoted.
+                self._run_job(job.id, evolve=evolve)
+                with self._lock:
+                    finished = self._jobs[job.id]
+                    promoted = bool((finished.summary or {}).get("accepted_count"))
+                    self._autoloop["runs_completed"] += 1
+                    self._autoloop["last_run_id"] = finished.run_id
+                    if finished.status == "failed":
+                        self._autoloop["last_outcome"] = "failed"
+                    elif promoted:
+                        self._autoloop["edits_promoted"] += 1
+                        self._autoloop["last_outcome"] = "promoted edit"
+                    else:
+                        self._autoloop["last_outcome"] = "no change"
+                # Brief pause so a stop signal lands promptly and the API stays responsive between runs.
+                self._autoloop_stop.wait(timeout=1.0)
+        except Exception as exc:  # noqa: BLE001 - record any controller failure rather than dying silently.
+            with self._lock:
+                self._autoloop["error"] = str(exc)
+            _log(f"autoloop error: {exc}")
+        finally:
+            with self._lock:
+                self._autoloop["active"] = False
+            _log("autoloop stopped")
 
     def _run_job(self, job_id: str, *, evolve: bool = True) -> None:
         with self._lock:
@@ -874,6 +975,12 @@ def _make_handler(app: HarnessUiApp) -> type[BaseHTTPRequestHandler]:
                     return
                 if parsed.path == "/api/harness/reset":
                     self._send_json(app.reset_harness_state())
+                    return
+                if parsed.path == "/api/autoloop/start":
+                    self._send_json(app.start_autoloop(self._read_json()), status=HTTPStatus.ACCEPTED)
+                    return
+                if parsed.path == "/api/autoloop/stop":
+                    self._send_json(app.stop_autoloop())
                     return
                 if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/promote-to-source"):
                     run_id = parsed.path.removeprefix("/api/runs/").removesuffix("/promote-to-source").strip("/")
@@ -1392,7 +1499,21 @@ _HTML = r"""<!doctype html>
             <div class="field"><label>Max proposals</label><input type="number" min="1" max="64" x-model.number="form.max_proposals"></div>
           </div>
           <div class="field"><label>Max payload bytes</label><input type="number" min="32" max="10000" x-model.number="form.max_payload_bytes"></div>
-          <button class="primary" style="width:100%" @click="startRun()" :disabled="starting" x-text="starting ? 'Starting…' : 'Start run'"></button>
+          <button class="primary" style="width:100%" @click="startRun()" :disabled="starting || autoloop.active" x-text="starting ? 'Starting…' : 'Start run'"></button>
+
+          <div class="field" style="margin-top:14px; border-top:1px solid var(--line); padding-top:14px;">
+            <label>Continuous self-improvement</label>
+            <div class="muted" style="font-size:12px;">Run evolving runs back-to-back. Each starts from the best-so-far harness; only non-regressing edits are promoted, so the harness improves monotonically. Runs until you stop it.</div>
+            <button class="primary" style="width:100%; margin-top:8px;" x-show="!autoloop.active" @click="startAutoloop()" :disabled="!glm.key_present">▶ Start continuous loop</button>
+            <button class="ghost" style="width:100%; margin-top:8px; border-color:var(--danger); color:var(--danger);" x-show="autoloop.active" @click="stopAutoloop()" x-text="autoloopStopping ? 'Stopping after current run…' : '■ Stop continuous loop'"></button>
+            <div x-show="autoloop.active || autoloop.runs_completed" class="muted" style="font-size:12px; margin-top:8px; display:flex; flex-wrap:wrap; gap:4px 12px;">
+              <span :style="autoloop.active ? 'color:var(--ok)' : ''" x-text="autoloop.active ? '● running' : '○ idle'"></span>
+              <span x-text="(autoloop.runs_completed||0) + ' runs'"></span>
+              <span :style="(autoloop.edits_promoted||0) ? 'color:var(--ok)' : ''" x-text="(autoloop.edits_promoted||0) + ' edits promoted'"></span>
+              <span x-show="autoloop.last_outcome" x-text="'last: ' + autoloop.last_outcome"></span>
+            </div>
+            <div x-show="autoloop.error" class="muted" style="font-size:12px; color:var(--danger); margin-top:6px;" x-text="autoloop.error"></div>
+          </div>
         </div>
       </section>
 
@@ -1655,6 +1776,7 @@ _HTML = r"""<!doctype html>
         tab: 'overview', view: 'runs', starting: false, toast: '', onlyEdits: false,
         harnessState: { evolving: false, source_run: null, harness_hash: null },
         autoPromote: true, seenPromotions: {},
+        autoloop: { active: false, runs_completed: 0, edits_promoted: 0, last_outcome: null, error: null }, autoloopStopping: false,
         form: { evolve: true, rounds: 3, seed: 0, evaluation_repeats: 2, max_proposals: 8, max_payload_bytes: 600 },
         dev: { instructions: '', success_criteria: '', use_repo: false, max_steps: 12, running: false, result: null, error: '' },
         chat: { messages: [], input: '', sending: false, error: '', usage: {} },
@@ -1684,6 +1806,7 @@ _HTML = r"""<!doctype html>
             this.serverProposer = state.proposer_mode || 'heuristic';
             this.harnessState = state.harness_state || { evolving: false };
             this.autoPromote = state.auto_promote_to_source !== false;
+            if (state.autoloop) { this.autoloop = state.autoloop; if (!state.autoloop.active) this.autoloopStopping = false; }
             for (const j of (state.jobs || [])) {
               if (j.status === 'completed' && j.source_promotion && !this.seenPromotions[j.id]) {
                 this.seenPromotions[j.id] = true;
@@ -1727,6 +1850,24 @@ _HTML = r"""<!doctype html>
         async resetHarness() {
           try { const r = await this.api('/api/harness/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); this.harnessState = r.harness_state || { evolving: false }; this.flash('Harness lineage reset to initial.'); }
           catch (e) { this.flash('reset failed: ' + e.message); }
+        },
+        async startAutoloop() {
+          try {
+            const body = { run_mode: 'agentic', rounds: this.form.rounds, seed: this.form.seed, evaluation_repeats: this.form.evaluation_repeats, max_proposals: this.form.max_proposals, max_payload_bytes: this.form.max_payload_bytes };
+            const r = await this.api('/api/autoloop/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            this.autoloopStopping = false;
+            if (r.autoloop) this.autoloop = r.autoloop;
+            this.flash(r.ok ? 'Continuous self-improvement started.' : (r.message || 'could not start'));
+            setTimeout(() => this.refresh(), 600);
+          } catch (e) { this.flash('autoloop start failed: ' + e.message); }
+        },
+        async stopAutoloop() {
+          try {
+            const r = await this.api('/api/autoloop/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+            this.autoloopStopping = true;
+            if (r.autoloop) this.autoloop = r.autoloop;
+            this.flash('Continuous loop will stop after the current run.');
+          } catch (e) { this.flash('autoloop stop failed: ' + e.message); }
         },
         async runDevTask() {
           this.dev.running = true; this.dev.error = ''; this.dev.result = null;

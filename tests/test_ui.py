@@ -171,6 +171,41 @@ def test_ui_reset_harness_state(tmp_path: Path) -> None:
     assert app.state()["harness_state"]["evolving"] is False
 
 
+def test_ui_autoloop_runs_continuously_until_stopped(tmp_path: Path) -> None:
+    # The continuous loop launches evolving runs back-to-back. Using the deterministic runner keeps this
+    # offline and fast. It must complete more than one run and stop cleanly on request.
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    started = app.start_autoloop({"run_mode": "deterministic", "rounds": 1, "evaluation_repeats": 1, "seed": 0})
+    assert started["ok"] is True
+    assert app.state()["autoloop"]["active"] is True
+
+    # Starting twice is a no-op while already running.
+    again = app.start_autoloop({"run_mode": "deterministic", "rounds": 1})
+    assert again["ok"] is False
+
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and app.state()["autoloop"]["runs_completed"] < 2:
+        time.sleep(0.1)
+    assert app.state()["autoloop"]["runs_completed"] >= 2
+
+    app.stop_autoloop()
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and app.state()["autoloop"]["active"]:
+        time.sleep(0.1)
+    final = app.state()["autoloop"]
+    assert final["active"] is False
+    assert final["error"] is None
+    # The deterministic demo accepts edits, so the loop should record at least one promoted edit.
+    assert final["edits_promoted"] >= 1
+
+
+def test_ui_stop_autoloop_when_not_running_is_safe(tmp_path: Path) -> None:
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    result = app.stop_autoloop()
+    assert result["ok"] is True
+    assert app.state()["autoloop"]["active"] is False
+
+
 def test_ui_run_can_opt_out_of_evolution(tmp_path: Path) -> None:
     app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
     job = app.start_run({"rounds": 1, "evaluation_repeats": 1, "seed": 0, "evolve": False})
