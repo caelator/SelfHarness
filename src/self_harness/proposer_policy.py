@@ -7,10 +7,17 @@ from hashlib import sha256
 from self_harness.types import FailurePattern, Proposal
 
 ADDRESSABLE_SURFACE_BY_MECHANISM: dict[str, tuple[str, ...]] = {
+    # Deterministic-runner mechanisms.
     "environment_persistence": ("execution",),
     "late_verification": ("verification",),
     "missing_artifact": ("bootstrap",),
     "repeated_failed_command": ("failure_recovery",),
+    # Agentic-runner mechanisms (GLM solver + Codex judge). A codex-judge failure means the agent
+    # finished but its output did not satisfy the success criteria — addressable by the surfaces that
+    # shape how the agent works and self-checks before stopping. A solver error (the agent crashed /
+    # mis-used a tool) is addressable by the failure-recovery guidance.
+    "codex-judge": ("system_prompt", "verification", "execution"),
+    "agent-solver-error": ("failure_recovery", "execution"),
 }
 
 

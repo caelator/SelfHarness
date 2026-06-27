@@ -1,6 +1,6 @@
 {
   "corpus_version": "1",
-  "corpus_id": "agentic-coding-smoke",
+  "corpus_id": "agentic-coding-mixed",
   "tasks": [
     {
       "id": "fizzbuzz-script",
@@ -40,6 +40,46 @@
       }
     },
     {
+      "id": "csv-column-sum",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Sum a numeric column in a CSV that has a header row, ignoring blank lines.",
+      "metadata": {
+        "instructions": "The file data.csv in the current directory has a header row `name,amount` followed by data rows. Some rows may be blank. Compute the SUM of the integer values in the `amount` column (the header row is NOT data and must be skipped) and write ONLY that integer to a file named sum.txt with no other characters.",
+        "success_criteria": "sum.txt exists and contains exactly the integer 60 (the sum of the amount column: 10 + 25 + 25), with no header text, no label, and no extra whitespace beyond an optional single trailing newline.",
+        "workspace_files": {
+          "data.csv": "name,amount\nalice,10\nbob,25\n\ncarol,25\n"
+        }
+      }
+    },
+    {
+      "id": "unique-sorted-words",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Produce the case-insensitive unique words from a file, lowercased and sorted.",
+      "metadata": {
+        "instructions": "The file words.txt contains one or more whitespace-separated words, with duplicates and mixed capitalization. Write a file named unique.txt containing each distinct word exactly once, compared case-insensitively, output in lowercase, sorted in ascending alphabetical order, one word per line. Do not include duplicate lines and do not include a leading or trailing blank line.",
+        "success_criteria": "unique.txt contains exactly these lines in this order: apple, banana, cherry (each lowercase, one per line, alphabetically sorted, no duplicates, no extra blank lines).",
+        "workspace_files": {
+          "words.txt": "Banana apple CHERRY banana Apple cherry APPLE\n"
+        }
+      }
+    },
+    {
+      "id": "divide-edge-case",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Fix a divide function to handle the division-by-zero edge case its tests require.",
+      "metadata": {
+        "instructions": "The file mathops.py defines divide(a, b). It must return a / b as a float, EXCEPT when b == 0, in which case it must return the string 'undefined' instead of raising. The current implementation crashes when b is 0. Fix mathops.py so that `python3 test_mathops.py` exits 0 and prints 'ok'. Run the test yourself to confirm before finishing.",
+        "success_criteria": "Running `python3 test_mathops.py` exits with code 0 and prints 'ok'; divide returns a / b normally and returns the string 'undefined' when b == 0.",
+        "workspace_files": {
+          "mathops.py": "def divide(a, b):\n    return a / b\n",
+          "test_mathops.py": "from mathops import divide\nassert divide(10, 2) == 5.0\nassert divide(9, 3) == 3.0\nassert divide(1, 0) == 'undefined', 'must handle divide-by-zero'\nprint('ok')\n"
+        }
+      }
+    },
+    {
       "id": "json-extract",
       "split": "held_out",
       "failure_mode": "agentic_coding",
@@ -62,6 +102,29 @@
         "success_criteria": "reversed.txt exists and contains the lines of lines.txt in reverse order.",
         "workspace_files": {
           "lines.txt": "alpha\nbeta\ngamma\n"
+        }
+      }
+    },
+    {
+      "id": "int-to-roman",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Convert an integer argument to a Roman numeral, including subtractive cases.",
+      "metadata": {
+        "instructions": "Create roman.py so that `python3 roman.py N` prints the Roman numeral for the positive integer N (1..3999) followed by a newline. You must handle subtractive notation correctly (e.g. 4=IV, 9=IX, 40=XL, 90=XC, 49=XLIX).",
+        "success_criteria": "`python3 roman.py 49` prints exactly `XLIX`, `python3 roman.py 4` prints `IV`, and `python3 roman.py 2024` prints `MMXXIV`, each on its own line."
+      }
+    },
+    {
+      "id": "balanced-brackets",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Decide whether the brackets in a string are correctly balanced and nested.",
+      "metadata": {
+        "instructions": "The file expr.txt contains a single line with brackets of three kinds: (), [], {}. Create a file named result.txt containing exactly `balanced` if every opening bracket has a matching closing bracket of the same kind in the correct nested order, or `unbalanced` otherwise. Non-bracket characters must be ignored.",
+        "success_criteria": "result.txt contains exactly the single word `balanced` (the input '([a]{b})' is correctly balanced and nested), with no extra characters beyond an optional trailing newline.",
+        "workspace_files": {
+          "expr.txt": "([a]{b})\n"
         }
       }
     }

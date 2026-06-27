@@ -52,7 +52,11 @@ Each task declares a `success_criteria` string for the judge and optional inline
 ```
 
 The held-in / held-out partition is enforced (disjoint, non-empty held-out). A bundled example lives
-at `examples/agentic_corpus.json`.
+at `examples/agentic_corpus.json` (`agentic-coding-mixed`: 6 held-in, 4 held-out). It deliberately
+mixes easy tasks with harder ones (CSV column-sum with a header + blank lines, case-insensitive unique
+sorted words, a divide-by-zero edge case, integer→Roman with subtractive notation, balanced-bracket
+checking) so the miner surfaces real failure patterns — giving the proposer something to fix and the
+acceptance gate something to promote, rather than every task passing trivially.
 
 ## Security boundary
 
