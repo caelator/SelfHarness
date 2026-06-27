@@ -1,4 +1,11 @@
-from self_harness.harness import apply_patch, initial_harness, structurally_mergeable
+from self_harness.harness import (
+    apply_patch,
+    dump_harness_spec,
+    initial_harness,
+    load_harness_spec,
+    render_initial_harness_source,
+    structurally_mergeable,
+)
 from self_harness.types import HarnessOp, HarnessPatch, stable_json_dumps
 
 
@@ -90,3 +97,42 @@ def test_non_declared_surface_is_rejected() -> None:
         assert "surface is not editable" in str(exc)
     else:
         raise AssertionError("expected invalid patch to fail")
+
+
+def test_harness_spec_dump_load_round_trip() -> None:
+    spec = initial_harness()
+    surfaces = dump_harness_spec(spec)
+    assert set(surfaces) == {
+        "system_prompt", "bootstrap", "execution", "verification", "failure_recovery",
+        "runtime_policy", "tools", "skills", "memory_sources", "subagents",
+    }
+    assert load_harness_spec(surfaces) == spec
+
+
+def test_load_harness_spec_rejects_bad_surface() -> None:
+    surfaces = dump_harness_spec(initial_harness())
+    surfaces["system_prompt"] = 123
+    try:
+        load_harness_spec(surfaces)
+    except ValueError as exc:
+        assert "system_prompt" in str(exc)
+    else:
+        raise AssertionError("expected invalid harness surface to fail")
+
+
+def test_render_initial_harness_source_reparses_to_same_spec() -> None:
+    spec = initial_harness()
+    patch = HarnessPatch([HarnessOp("AppendToSurface", "bootstrap", "Create explicit artifacts early.")])
+    evolved, _ = apply_patch(spec, patch)
+
+    source = render_initial_harness_source(evolved)
+    # The rendered block must be a self-contained, re-parseable initial_harness() definition.
+    namespace: dict[str, object] = {}
+    preamble = "from self_harness.types import HarnessSpec\n"
+    body = source.replace(
+        "# >>> SELF_HARNESS_INITIAL_HARNESS_START (machine-managed; promote-to-source rewrites this block)",
+        "",
+    ).replace("# <<< SELF_HARNESS_INITIAL_HARNESS_END", "")
+    exec(preamble + body, namespace)  # noqa: S102 - exercising the generated source on purpose
+    rebuilt = namespace["initial_harness"]()  # type: ignore[operator]
+    assert dump_harness_spec(rebuilt) == dump_harness_spec(evolved)

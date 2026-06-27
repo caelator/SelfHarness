@@ -1,4 +1,4 @@
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.evaluation import acceptance_rule, evaluate
 from self_harness.harness import apply_patch, initial_harness
 from self_harness.types import HarnessOp, HarnessPatch
@@ -6,7 +6,7 @@ from self_harness.types import HarnessOp, HarnessPatch
 
 def test_acceptance_accepts_strict_non_regression() -> None:
     spec = initial_harness()
-    baseline = evaluate(ToyRunner(), spec, demo_tasks(), repeats=2)
+    baseline = evaluate(DeterministicRunner(), spec, demo_tasks(), repeats=2)
     candidate, _ = apply_patch(
         spec,
         HarnessPatch(
@@ -23,7 +23,7 @@ def test_acceptance_accepts_strict_non_regression() -> None:
         ),
     )
 
-    candidate_result = evaluate(ToyRunner(), candidate, demo_tasks(), repeats=2)
+    candidate_result = evaluate(DeterministicRunner(), candidate, demo_tasks(), repeats=2)
     decision = acceptance_rule(baseline, candidate_result)
 
     assert baseline.held_in.total == 8
@@ -34,7 +34,7 @@ def test_acceptance_accepts_strict_non_regression() -> None:
 
 def test_acceptance_rejects_held_out_regression() -> None:
     spec = initial_harness()
-    baseline = evaluate(ToyRunner(), spec, demo_tasks(), repeats=2)
+    baseline = evaluate(DeterministicRunner(), spec, demo_tasks(), repeats=2)
     candidate, _ = apply_patch(
         spec,
         HarnessPatch(
@@ -48,7 +48,7 @@ def test_acceptance_rejects_held_out_regression() -> None:
         ),
     )
 
-    decision = acceptance_rule(baseline, evaluate(ToyRunner(), candidate, demo_tasks(), repeats=2))
+    decision = acceptance_rule(baseline, evaluate(DeterministicRunner(), candidate, demo_tasks(), repeats=2))
 
     assert not decision.accepted
     assert "regresses" in decision.reason
@@ -56,9 +56,9 @@ def test_acceptance_rejects_held_out_regression() -> None:
 
 def test_acceptance_rejects_tie() -> None:
     spec = initial_harness()
-    baseline = evaluate(ToyRunner(), spec, demo_tasks(), repeats=2)
+    baseline = evaluate(DeterministicRunner(), spec, demo_tasks(), repeats=2)
 
-    decision = acceptance_rule(baseline, evaluate(ToyRunner(), spec, demo_tasks(), repeats=2))
+    decision = acceptance_rule(baseline, evaluate(DeterministicRunner(), spec, demo_tasks(), repeats=2))
 
     assert not decision.accepted
     assert "ties" in decision.reason

@@ -1,4 +1,4 @@
-"""Adapters for non-toy Self-Harness integrations."""
+"""Adapters for real Self-Harness integrations."""
 
 from self_harness.adapters.base import TaskAdapter
 from self_harness.adapters.container_verifier import (

@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from self_harness.config import EngineConfig
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine
 from self_harness.types import HarnessPatch, Proposal, ProposerContext
 
@@ -43,7 +43,7 @@ class PreInvalidatedProposer:
 def test_invalid_proposal_is_audited(tmp_path: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(),
+        runner=DeterministicRunner(),
         proposer=EmptyPatchProposer(),
         out_dir=tmp_path,
         config=EngineConfig(rounds=1),
@@ -65,7 +65,7 @@ def test_invalid_proposal_is_audited(tmp_path: Path) -> None:
 def test_proposer_side_invalid_reason_is_audited(tmp_path: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(),
+        runner=DeterministicRunner(),
         proposer=PreInvalidatedProposer(),
         out_dir=tmp_path,
         config=EngineConfig(rounds=1),

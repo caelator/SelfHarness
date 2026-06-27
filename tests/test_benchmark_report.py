@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from self_harness.config import EngineConfig
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine
 from self_harness.proposer import HeuristicProposer
 from self_harness.reporting import build_benchmark_report
@@ -54,7 +54,7 @@ def test_benchmark_report_cli_writes_stable_json(tmp_path: Path) -> None:
 def _run_demo(out_dir: Path, *, model_id: str) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, seed=0, model_id=model_id),

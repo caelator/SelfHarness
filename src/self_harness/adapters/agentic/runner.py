@@ -68,7 +68,7 @@ class GLMAgenticRunner:
     outcomes, so the acceptance gate promotes edits that truly help.
 
     Outcomes are stochastic, so audits produced by this runner are not byte-reproducible — this is
-    real agentic evaluation, not the deterministic ToyRunner demo.
+    real agentic evaluation, not the deterministic demo runner.
     """
 
     transport_factory: TransportFactory

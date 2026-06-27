@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from self_harness.audit import SUPPORTED_SCHEMA_VERSIONS, AuditRound, AuditRun, load_audit_run
-from self_harness.exceptions import AuditVerificationError
-from self_harness.harness import harness_hash
+from self_harness.exceptions import AuditVerificationError, InvalidPatchError
+from self_harness.harness import harness_hash, load_harness_spec
 from self_harness.types import HarnessSpec, stable_json_dumps
 
 AUDIT_VERIFICATION_SCHEMA_VERSION = "1.0"
@@ -525,41 +525,12 @@ def _safe_harness_hash(value: dict[str, Any]) -> str | None:
 
 
 def _harness_from_json(value: dict[str, Any]) -> HarnessSpec:
-    required = {
-        "system_prompt": str,
-        "bootstrap": str,
-        "execution": str,
-        "verification": str,
-        "failure_recovery": str,
-        "runtime_policy": dict,
-        "tools": list,
-        "skills": list,
-        "memory_sources": list,
-        "subagents": list,
-    }
-    for key, expected_type in required.items():
-        if key not in value or not isinstance(value[key], expected_type):
-            raise AuditVerificationError(f"harness snapshot missing valid {key}")
-    if not all(isinstance(item, str) for item in value["tools"]):
-        raise AuditVerificationError("harness tools must be strings")
-    if not all(isinstance(item, str) for item in value["skills"]):
-        raise AuditVerificationError("harness skills must be strings")
-    if not all(isinstance(item, str) for item in value["memory_sources"]):
-        raise AuditVerificationError("harness memory_sources must be strings")
-    if not all(isinstance(item, dict) for item in value["subagents"]):
-        raise AuditVerificationError("harness subagents must be objects")
-    return HarnessSpec(
-        system_prompt=value["system_prompt"],
-        bootstrap=value["bootstrap"],
-        execution=value["execution"],
-        verification=value["verification"],
-        failure_recovery=value["failure_recovery"],
-        runtime_policy=dict(value["runtime_policy"]),
-        tools=list(value["tools"]),
-        skills=list(value["skills"]),
-        memory_sources=list(value["memory_sources"]),
-        subagents=[dict(item) for item in value["subagents"]],
-    )
+    # Shared reconstruction + per-surface validation lives in harness.load_harness_spec; re-raise as an
+    # AuditVerificationError so the verifier's error contract is unchanged.
+    try:
+        return load_harness_spec(value)
+    except InvalidPatchError as exc:
+        raise AuditVerificationError(str(exc)) from exc
 
 
 def _report(

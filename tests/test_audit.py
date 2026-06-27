@@ -14,7 +14,7 @@ from self_harness.audit import (
     write_harness_inspection,
 )
 from self_harness.cli import main
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine
 from self_harness.exceptions import AuditCorruptError
 from self_harness.proposer import HeuristicProposer
@@ -156,7 +156,7 @@ def test_harness_inspection_cli_writes_and_prints_json(tmp_path: Path, capsys) -
 def _run_demo(out_dir: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(),
+        runner=DeterministicRunner(),
         proposer=HeuristicProposer(),
         out_dir=out_dir,
     )

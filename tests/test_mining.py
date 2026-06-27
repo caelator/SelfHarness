@@ -1,4 +1,4 @@
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.evaluation import evaluate
 from self_harness.harness import initial_harness
 from self_harness.mining import cluster_failures
@@ -6,7 +6,7 @@ from self_harness.types import RunRecord, Split, TraceEvent, VerifierOutcome
 
 
 def test_clusters_failed_held_in_records_by_signature() -> None:
-    result = evaluate(ToyRunner(), initial_harness(), demo_tasks())
+    result = evaluate(DeterministicRunner(), initial_harness(), demo_tasks())
     patterns = cluster_failures(result.records, split=Split.HELD_IN)
 
     assert [pattern.support for pattern in patterns] == [1, 1, 1, 1]

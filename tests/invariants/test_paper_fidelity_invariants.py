@@ -17,7 +17,7 @@ from self_harness.audit import SCHEMA_CHANGELOG_DOC, SUPPORTED_SCHEMA_VERSIONS, 
 from self_harness.audit_verify import verify_audit_run
 from self_harness.config import EngineConfig
 from self_harness.corpus import TaskCorpus
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine, validate_benchmark_claims, validate_proposer_context
 from self_harness.evaluation import acceptance_rule, evaluate
 from self_harness.exceptions import InvalidPatchError, PaperFidelityError
@@ -53,7 +53,7 @@ PYTHON_VERIFIER_MODULE = Path("tests/fixtures/in_process_verifier.py")
 def test_harness_lineage_hashes_match_committed_round_state(tmp_path: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=HeuristicProposer(),
         out_dir=tmp_path,
         config=EngineConfig(rounds=2, seed=0),
@@ -96,7 +96,7 @@ def test_loop_runs_all_rounds_and_does_not_break_after_an_empty_round(tmp_path: 
 
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=LateProposer(),
         out_dir=tmp_path,
         config=EngineConfig(rounds=3, seed=0),
@@ -123,7 +123,7 @@ def test_engine_rejects_overlapping_split_partition(tmp_path: Path) -> None:
     with pytest.raises(PaperFidelityError):
         SelfHarnessEngine(
             tasks=overlapping,
-            runner=ToyRunner(seed=0),
+            runner=DeterministicRunner(seed=0),
             proposer=HeuristicProposer(),
             out_dir=tmp_path,
             config=EngineConfig(rounds=1, seed=0),
@@ -141,7 +141,7 @@ def test_engine_rejects_empty_held_out_split(tmp_path: Path) -> None:
     with pytest.raises(PaperFidelityError):
         SelfHarnessEngine(
             tasks=held_in_only,
-            runner=ToyRunner(seed=0),
+            runner=DeterministicRunner(seed=0),
             proposer=HeuristicProposer(),
             out_dir=tmp_path,
             config=EngineConfig(rounds=1, seed=0),
@@ -154,7 +154,7 @@ def test_evaluation_rows_persist_full_cqm_signature(tmp_path: Path) -> None:
     # is reconstructable from evaluations.jsonl alone.
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=HeuristicProposer(),
         out_dir=tmp_path,
         config=EngineConfig(rounds=1, seed=0),
@@ -177,7 +177,7 @@ def test_round_persists_evidence_bundle_patterns_json(tmp_path: Path) -> None:
     # artifacts. patterns.json holds the held-in failure patterns with their full evidence.
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=HeuristicProposer(),
         out_dir=tmp_path,
         config=EngineConfig(rounds=1, seed=0),
@@ -322,7 +322,7 @@ def test_acceptance_rule_rejects_ties_and_split_regressions() -> None:
 
 
 def test_evaluation_repeats_are_aggregate_pass_counts() -> None:
-    result = evaluate(ToyRunner(seed=0), initial_harness(), demo_tasks(), repeats=2)
+    result = evaluate(DeterministicRunner(seed=0), initial_harness(), demo_tasks(), repeats=2)
 
     assert result.evaluation_repeats == 2
     assert result.held_in.total == 8
@@ -373,7 +373,7 @@ def test_terminal_bench_capture_artifacts_cannot_claim_reproduction() -> None:
 def test_llm_driven_terminal_bench_audit_cannot_claim_reproduction(tmp_path: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=LLMProposer(MockLLMClient()),
         out_dir=tmp_path,
         config=EngineConfig(
@@ -395,7 +395,7 @@ def test_llm_driven_terminal_bench_audit_cannot_claim_reproduction(tmp_path: Pat
 def test_llm_proposer_rejects_ungrounded_pattern_id(tmp_path: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=LLMProposer(MockLLMClient(mode="ungrounded")),
         out_dir=tmp_path,
         config=EngineConfig(rounds=1, seed=0, schema_version="1.4", model_id="mock-llm-proposer"),
@@ -519,7 +519,7 @@ def test_terminal_bench_dry_run_hash_is_stable_under_ambient_environment_changes
 def _run_canonical_demo(out_dir: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, seed=0),

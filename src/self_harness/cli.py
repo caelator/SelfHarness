@@ -102,7 +102,7 @@ from self_harness.corpus_signing import (
     public_key_fingerprint,
     sign_corpus,
 )
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import RoundSummary, SelfHarnessEngine
 from self_harness.exceptions import (
     AuditCorruptError,
@@ -180,6 +180,36 @@ def main(argv: list[str] | None = None) -> int:
         default=os.environ.get("SELF_HARNESS_UI_PROPOSER", "heuristic"),
         help="proposal backend for UI-started runs; glm requires ZAI_API_KEY",
     )
+    ui_parser.add_argument(
+        "--harness-state",
+        type=Path,
+        default=None,
+        help="path to the evolving harness lineage file (default: <runs-dir>/harness_state.json)",
+    )
+    ui_parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=12,
+        help="max agent tool-calling steps per attempt for agentic/dev-task runs",
+    )
+    ui_parser.add_argument(
+        "--tool-timeout-seconds",
+        type=int,
+        default=30,
+        help="per-command timeout for agentic/dev-task tool calls",
+    )
+    ui_parser.add_argument(
+        "--codex-binary",
+        default="codex",
+        help="Codex CLI binary used as the agentic/dev-task judge",
+    )
+    ui_parser.add_argument(
+        "--no-auto-promote",
+        dest="auto_promote_to_source",
+        action="store_false",
+        help="do not auto-integrate reviewer-approved edits into harness.py (preview only via the API)",
+    )
+    ui_parser.set_defaults(auto_promote_to_source=True)
 
     model_preflight_parser = subparsers.add_parser(
         "model-preflight",
@@ -852,6 +882,11 @@ def main(argv: list[str] | None = None) -> int:
             root=args.root,
             runs_dir=args.runs_dir,
             proposer_mode=args.proposer,
+            harness_state=args.harness_state,
+            max_steps=args.max_steps,
+            tool_timeout_seconds=args.tool_timeout_seconds,
+            codex_binary=args.codex_binary,
+            auto_promote_to_source=args.auto_promote_to_source,
         )
     if args.command == "model-preflight":
         return _run_model_preflight(
@@ -1179,7 +1214,7 @@ def _run_demo(
     )
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=seed),
+        runner=DeterministicRunner(seed=seed),
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=config,
@@ -1346,11 +1381,13 @@ def _run_glm_agentic_demo(
     signature_key: Path | None,
     keyring_path: Path | None,
 ) -> int:
-    from self_harness.adapters.agentic.runner import AGENTIC_MODEL_ID, GLMAgenticTaskAdapter
-    from self_harness.adapters.llm.paper_models import GLMClient
+    from self_harness.adapters.agentic.runner import GLMAgenticTaskAdapter
+    from self_harness.agentic_session import (
+        HOST_EXEC_WARNING_LINES,
+        build_agentic_config,
+        build_proposer,
+    )
     from self_harness.exceptions import AgenticRunnerError, LLMClientError
-    from self_harness.llm_proposer import LLMProposer
-    from self_harness.model_backend_preflight import build_zai_transport
 
     api_key = os.environ.get("ZAI_API_KEY")
     if not api_key:
@@ -1358,13 +1395,12 @@ def _run_glm_agentic_demo(
         return 2
     base_url = os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/anthropic")
 
-    config = EngineConfig(
+    config = build_agentic_config(
         rounds=rounds,
         seed=seed,
         evaluation_repeats=evaluation_repeats,
-        proposal_budget=ProposalBudget(max_proposals=max_proposals, max_payload_bytes=max_payload_bytes),
-        model_id=AGENTIC_MODEL_ID,
-        schema_version="1.4",
+        max_proposals=max_proposals,
+        max_payload_bytes=max_payload_bytes,
     )
     adapter = GLMAgenticTaskAdapter(
         api_key=api_key,
@@ -1387,20 +1423,14 @@ def _run_glm_agentic_demo(
         print(stable_json_dumps({"ok": False, "reason": reason, "message": str(exc)}))
         return 2
 
-    if proposer_mode == "glm":
-        try:
-            transport = build_zai_transport(base_url=base_url, api_key=api_key)
-        except LLMClientError as exc:
-            print(stable_json_dumps({"ok": False, "reason": "invalid-runner", "message": str(exc)}))
-            return 2
-        proposer: HeuristicProposer | LLMProposer = LLMProposer(
-            GLMClient(transport=transport, max_tokens=4096, temperature=0.0)
-        )
-    else:
-        proposer = HeuristicProposer()
+    try:
+        proposer = build_proposer(proposer_mode, api_key=api_key, base_url=base_url)
+    except LLMClientError as exc:
+        print(stable_json_dumps({"ok": False, "reason": "invalid-runner", "message": str(exc)}))
+        return 2
 
-    print("WARNING: glm-agentic-demo executes model-generated commands on this host (no container).")
-    print("Run only trusted corpora. This is real agentic evaluation, NOT a Terminal-Bench reproduction.")
+    for line in HOST_EXEC_WARNING_LINES:
+        print(f"WARNING: {line}")
 
     engine = SelfHarnessEngine(
         tasks=adapter.load(corpus),

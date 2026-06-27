@@ -1,45 +1,98 @@
 # Web Interface
 
 SelfHarness ships a self-contained operator console served by the Python stdlib
-HTTP server (no build step; the single-page app loads Alpine.js from a CDN for
-reactivity and degrades to a JSON-API notice without JavaScript):
+HTTP server (no build step). Alpine.js is **vendored and served locally** from
+`/static/alpine-3.14.1.min.js`, so the console works fully offline; if the script
+ever fails to load, a visible banner explains it and points at the JSON API rather
+than rendering a blank page.
 
 ```bash
 self-harness ui --host 127.0.0.1 --port 8765 --root . --runs-dir runs
 ```
 
+Agentic and dev-task features additionally accept `--max-steps`,
+`--tool-timeout-seconds`, `--codex-binary`, and `--harness-state` (path to the
+evolving harness lineage; default `<runs-dir>/harness_state.json`). Pass
+`--no-auto-promote` to stop reviewer-approved edits from being written back into
+`harness.py` automatically (see *Promote evolved harness to source* below).
+
 ## Console features
 
-The console is a single-page app with five views:
+The console has three top-level views — **Runs**, **Dev task**, and **Chat**:
 
-1. **Run launcher** — start a run with every engine knob exposed (rounds, seed,
-   evaluation repeats, max proposals, max payload bytes) and a proposer selector
-   (heuristic toy proposer or GLM 5.2).
-2. **Overview** — final held-in/held-out pass rates, accept/reject counts, and
-   GLM token usage (input/output/total) when a GLM run was executed.
-3. **Trajectory** — per-round step view with held-in/held-out deltas and
-   accept/merge/carry-forward badges; click a round to drill in.
+### Runs
+
+1. **Run launcher** — start a run with every engine knob (rounds, seed, evaluation
+   repeats, max proposals, max payload bytes) and harness-lineage controls. The
+   console launches **agentic** runs: GLM 5.2 solves a real task corpus with
+   `bash`/`read_file`/`write_file` tools and the Codex CLI judges each result, so
+   promoted edits change genuine pass rates. Commands run on the host (no
+   container); only run trusted corpora.
+   - **Harness lineage** — *evolve from persisted* (default) starts each run from
+     the last promoted harness so the harness improves across runs/sessions;
+     **Reset** discards the lineage back to `initial_harness()` (Figure 3).
+2. **Overview** — final held-in/held-out pass rates, accept/reject counts, GLM
+   token usage.
+3. **Trajectory** — per-round step view with deltas and accept/merge/carry badges.
 4. **Round drill-down** — the mined evidence bundle `B_t` (failure patterns with
-   their full `(c, q, m)` signature and supporting task ids), and every proposal
-   with its rationale, expected effect, regression risks, split deltas, and
-   accept/reject decision.
-5. **Harness diff** — the initial (Figure 3) harness surfaces side-by-side with
-   the final promoted harness, with changed surfaces highlighted.
+   full `(c, q, m)` signatures) and every proposal with rationale, expected effect,
+   regression risks, split deltas, and decision.
+5. **Harness diff** — initial (Figure 3) vs final promoted surfaces, with the
+   **Promote → source** integration described below.
+
+### Dev task
+
+Hand GLM 5.2 a free-form development task: instructions + Codex success criteria,
+optional inline workspace files, or "use the SelfHarness repo as the workspace"
+(GLM edits a *copy* of this repo, never the live tree). GLM solves it with real
+tools under the current evolving harness, Codex judges, and the console shows the
+verdict, step/tool counts, final message, and full trajectory. No harness mutation.
+
+### Chat
+
+A direct GLM 5.2 chat panel for talking to and directing the model, independent of
+the harness loop. Single-shot calls carry conversation context; token usage is
+reported per turn.
 
 A GLM status banner reflects live reachability (operational / needs funding /
 unreachable). The console never claims Terminal-Bench reproduction.
+
+### Promote evolved harness to source
+
+When a run's acceptance gate (the "reviewer": `Δin≥0 ∧ Δho≥0 ∧ max(Δin,Δho)>0`)
+promotes at least one edit, that evolved harness is **integrated into source
+automatically** — written back into `initial_harness()` in
+`src/self_harness/harness.py`, closing the self-improvement loop into real code
+with no separate manual approval. There is no approval gate on *whether* to
+integrate an approved edit; there is only a **correctness** gate on *how*: the
+write backs up the original to `harness.py.bak`, rewrites the marker-delimited
+block, then runs ruff + mypy + an import round-trip that confirms the rewritten
+`initial_harness()` reconstructs the promoted spec. If that gate fails, the source
+is restored automatically, so a bad rewrite is never left in the tree. The console
+flashes the outcome and the Harness-diff tab notes that integration is automatic.
+
+Auto-integration is on by default. Launch with `--no-auto-promote` to disable it
+(the run still persists its evolving lineage, but source is left untouched); the
+Harness-diff tab then offers **Preview diff** and a manual **Integrate into
+harness.py** button driven by the same correctness-gated path.
 
 ### JSON API
 
 The console is backed by a small JSON API you can also use directly:
 
 ```text
-GET  /api/state                       overall state, run list, proposer mode
+GET  /                                the console (loads /static/alpine-3.14.1.min.js)
+GET  /static/<asset>                  vendored front-end assets (allowlisted)
+GET  /api/state                       overall state, run list, proposer mode, harness lineage
 GET  /api/preflight                   GLM 5.2 reachability (dry-run or live)
 GET  /api/runs/<id>                   run summary, trajectory, harness inspection, token usage
 GET  /api/runs/<id>/rounds/<n>        round patterns, proposals, evaluations
 GET  /api/runs/<id>/harness           initial vs final harness surfaces
-POST /api/runs                        start a run (JSON body of engine knobs)
+POST /api/runs                        start a run (engine knobs + run_mode + evolve)
+POST /api/dev-task                    GLM solves one described task; Codex judges
+POST /api/chat                        single-shot GLM 5.2 chat with history
+POST /api/harness/reset               discard the evolving harness lineage
+POST /api/runs/<id>/promote-to-source render/diff (and apply by default; pass {"apply": false} for a preview)
 ```
 
 ## GLM 5.2 proposer backend

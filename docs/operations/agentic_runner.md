@@ -2,8 +2,8 @@
 
 The `glm-agentic-demo` command runs Self-Harness with a **real agentic runner**: GLM 5.2 actually
 solves each task as a tool-using agent under the candidate harness, and a real verifier (the Codex
-CLI) judges success. This is the difference between the toy demo and a production loop — harness
-edits change genuine task-success rates, so the acceptance gate promotes edits that truly help.
+CLI) judges success. This is the difference between the deterministic demo and a production loop —
+harness edits change genuine task-success rates, so the acceptance gate promotes edits that truly help.
 
 ```bash
 export ZAI_API_KEY="<z.ai coding-plan key>"

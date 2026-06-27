@@ -41,8 +41,13 @@ def demo_tasks() -> list[Task]:
 
 
 @dataclass(frozen=True)
-class ToyRunner:
-    """A deterministic runner that makes the validation gate observable."""
+class DeterministicRunner:
+    """A deterministic runner that makes the validation gate observable.
+
+    Scores a harness by checking whether its surfaces declare the rules each demo failure mode needs.
+    This backs the offline, byte-reproducible ``demo`` path and the test suite; real task outcomes come
+    from the GLM agentic runner.
+    """
 
     seed: int = 0
 
@@ -103,7 +108,7 @@ class ToyRunner:
                 "Verifier saw premature artifact creation displace required planning.",
                 "agent created output too early on a planning-heavy task",
             )
-        raise ValueError(f"unknown toy failure mode: {task.failure_mode}")
+        raise ValueError(f"unknown demo failure mode: {task.failure_mode}")
 
 
 def _has_broad_artifact_rule(harness: HarnessSpec) -> bool:

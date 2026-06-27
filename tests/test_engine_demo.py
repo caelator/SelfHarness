@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine
 from self_harness.proposer import HeuristicProposer
 
@@ -48,7 +48,7 @@ def test_demo_end_to_end_and_deterministic(tmp_path: Path) -> None:
 def _run(out_dir: Path):
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         seed=0,

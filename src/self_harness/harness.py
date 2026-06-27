@@ -25,6 +25,7 @@ SURFACE_KINDS = {
 }
 
 
+# >>> SELF_HARNESS_INITIAL_HARNESS_START (machine-managed; promote-to-source rewrites this block)
 def initial_harness() -> HarnessSpec:
     # Verbatim from the paper's Figure 3 (arXiv:2606.09498, page 8): the minimal
     # DeepAgent-based initial harness used as the starting point for Self-Harness.
@@ -54,10 +55,113 @@ def initial_harness() -> HarnessSpec:
         memory_sources=["/AGENTS.md"],
         subagents=[],
     )
+# <<< SELF_HARNESS_INITIAL_HARNESS_END
 
 
 def harness_hash(spec: HarnessSpec) -> str:
     return sha256(stable_json_dumps(spec).encode("utf-8")).hexdigest()
+
+
+INITIAL_HARNESS_START_MARKER = (
+    "# >>> SELF_HARNESS_INITIAL_HARNESS_START (machine-managed; promote-to-source rewrites this block)"
+)
+INITIAL_HARNESS_END_MARKER = "# <<< SELF_HARNESS_INITIAL_HARNESS_END"
+
+
+def render_initial_harness_source(spec: HarnessSpec) -> str:
+    """Render the ``initial_harness()`` source block (between the sentinel markers) for a given spec.
+
+    Used by the gated promote-to-source action to write an evolved harness back into this module. Output
+    is deterministic and ``repr``-based so it re-parses to an identical spec.
+    """
+
+    surfaces = dump_harness_spec(spec)
+    lines = [
+        INITIAL_HARNESS_START_MARKER,
+        "def initial_harness() -> HarnessSpec:",
+        "    # Promoted from an evolved Self-Harness lineage via the operator console (promote-to-source).",
+        "    return HarnessSpec(",
+        f"        system_prompt={surfaces['system_prompt']!r},",
+        f"        bootstrap={surfaces['bootstrap']!r},",
+        f"        execution={surfaces['execution']!r},",
+        f"        verification={surfaces['verification']!r},",
+        f"        failure_recovery={surfaces['failure_recovery']!r},",
+        f"        runtime_policy={surfaces['runtime_policy']!r},",
+        f"        tools={surfaces['tools']!r},",
+        f"        skills={surfaces['skills']!r},",
+        f"        memory_sources={surfaces['memory_sources']!r},",
+        f"        subagents={surfaces['subagents']!r},",
+        "    )",
+        INITIAL_HARNESS_END_MARKER,
+    ]
+    return "\n".join(lines)
+
+
+_HARNESS_SURFACE_TYPES: dict[str, type] = {
+    "system_prompt": str,
+    "bootstrap": str,
+    "execution": str,
+    "verification": str,
+    "failure_recovery": str,
+    "runtime_policy": dict,
+    "tools": list,
+    "skills": list,
+    "memory_sources": list,
+    "subagents": list,
+}
+
+
+def dump_harness_spec(spec: HarnessSpec) -> dict[str, Any]:
+    """Serialize a HarnessSpec to the canonical surface dict.
+
+    This matches the ``harness_before.json`` / ``harness_after.json`` snapshot shape written per round,
+    so a dumped spec round-trips through ``load_harness_spec`` and through the audit verifier.
+    """
+
+    return {
+        "system_prompt": spec.system_prompt,
+        "bootstrap": spec.bootstrap,
+        "execution": spec.execution,
+        "verification": spec.verification,
+        "failure_recovery": spec.failure_recovery,
+        "runtime_policy": dict(spec.runtime_policy),
+        "tools": list(spec.tools),
+        "skills": list(spec.skills),
+        "memory_sources": list(spec.memory_sources),
+        "subagents": [dict(item) for item in spec.subagents],
+    }
+
+
+def load_harness_spec(value: dict[str, Any]) -> HarnessSpec:
+    """Reconstruct a HarnessSpec from a surface dict, validating every surface's type.
+
+    Raises ``InvalidPatchError`` on any missing or wrongly-typed surface. The audit verifier reuses this
+    so persisted/evolved harness state and audited snapshots share one validation path.
+    """
+
+    for key, expected_type in _HARNESS_SURFACE_TYPES.items():
+        if key not in value or not isinstance(value[key], expected_type):
+            raise InvalidPatchError(f"harness snapshot missing valid {key}")
+    if not all(isinstance(item, str) for item in value["tools"]):
+        raise InvalidPatchError("harness tools must be strings")
+    if not all(isinstance(item, str) for item in value["skills"]):
+        raise InvalidPatchError("harness skills must be strings")
+    if not all(isinstance(item, str) for item in value["memory_sources"]):
+        raise InvalidPatchError("harness memory_sources must be strings")
+    if not all(isinstance(item, dict) for item in value["subagents"]):
+        raise InvalidPatchError("harness subagents must be objects")
+    return HarnessSpec(
+        system_prompt=value["system_prompt"],
+        bootstrap=value["bootstrap"],
+        execution=value["execution"],
+        verification=value["verification"],
+        failure_recovery=value["failure_recovery"],
+        runtime_policy=dict(value["runtime_policy"]),
+        tools=list(value["tools"]),
+        skills=list(value["skills"]),
+        memory_sources=list(value["memory_sources"]),
+        subagents=[dict(item) for item in value["subagents"]],
+    )
 
 
 def validate_op(op: HarnessOp) -> None:

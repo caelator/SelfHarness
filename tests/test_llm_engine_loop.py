@@ -3,7 +3,7 @@ from pathlib import Path
 
 from self_harness.audit import load_audit_run, summarize_audit_run, write_audit_trajectory
 from self_harness.config import EngineConfig
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine, proposer_request_sha256
 from self_harness.llm_proposer import LLMProposer
 from self_harness.readiness import audit_tree_hash
@@ -14,7 +14,7 @@ def test_mock_llm_proposer_runs_through_engine_loop(tmp_path: Path) -> None:
     client = MockLLMClient(seed=12)
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=LLMProposer(client),
         out_dir=tmp_path,
         config=EngineConfig(rounds=2, seed=0, schema_version="1.4", model_id="mock-llm-proposer"),
@@ -48,7 +48,7 @@ def test_opt_in_proposer_request_log_writes_raw_rows(tmp_path: Path) -> None:
     client = MockLLMClient(seed=0)
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=LLMProposer(client),
         out_dir=tmp_path,
         config=EngineConfig(rounds=1, seed=0, schema_version="1.4", model_id="mock-llm-proposer"),
@@ -94,7 +94,7 @@ def test_mock_llm_canonical_audit_hash_is_stable_under_ambient_environment_chang
 def test_ungrounded_mock_llm_proposal_is_audited_as_invalid(tmp_path: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=LLMProposer(MockLLMClient(mode="ungrounded")),
         out_dir=tmp_path,
         config=EngineConfig(rounds=1, seed=0, schema_version="1.4", model_id="mock-llm-proposer"),
@@ -111,7 +111,7 @@ def test_ungrounded_mock_llm_proposal_is_audited_as_invalid(tmp_path: Path) -> N
 def _run_mock_llm_canonical(out_dir: Path) -> None:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=LLMProposer(MockLLMClient(seed=0)),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, seed=0, schema_version="1.4", model_id="mock-llm-proposer"),

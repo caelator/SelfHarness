@@ -7,7 +7,7 @@ import pytest
 from self_harness.audit_verify import verify_audit_run
 from self_harness.cli import main
 from self_harness.config import EngineConfig
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine
 from self_harness.exceptions import AuditCorruptError
 from self_harness.proposer import HeuristicProposer
@@ -162,7 +162,7 @@ def test_audit_verify_cli_writes_report_and_uses_exit_codes(tmp_path: Path, caps
 def _write_demo_audit(out_dir: Path) -> Path:
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
-        runner=ToyRunner(seed=0),
+        runner=DeterministicRunner(seed=0),
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, seed=0),

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -15,14 +17,24 @@ from typing import Any
 from urllib.parse import urlparse
 
 from self_harness.adapters.llm.paper_models import GLMClient
+from self_harness.adapters.terminal_bench.agent_render import render_system_prompt
 from self_harness.audit import (
     audit_trajectory_rows,
     inspect_harness_run,
     summarize_audit_run,
 )
 from self_harness.config import EngineConfig
-from self_harness.demo import ToyRunner, demo_tasks
+from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine
+from self_harness.exceptions import InvalidPatchError
+from self_harness.harness import (
+    INITIAL_HARNESS_END_MARKER,
+    INITIAL_HARNESS_START_MARKER,
+    dump_harness_spec,
+    harness_hash,
+    load_harness_spec,
+    render_initial_harness_source,
+)
 from self_harness.llm_proposer import LLMProposer
 from self_harness.model_backend_preflight import (
     ModelBackendPreflightError,
@@ -31,9 +43,36 @@ from self_harness.model_backend_preflight import (
     model_backend_preflight_report_to_jsonable,
 )
 from self_harness.proposer import HeuristicProposer
-from self_harness.types import ProposalBudget, stable_json_dumps, to_jsonable
+from self_harness.types import HarnessSpec, ProposalBudget, stable_json_dumps, to_jsonable, write_stable_json
 
 UI_SCHEMA_VERSION = "1.0"
+
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+# Allowlisted vendored assets served at /static/<name>. Keeping this explicit means the static route
+# never resolves arbitrary filesystem paths.
+_STATIC_ASSETS = {
+    "alpine-3.14.1.min.js": "text/javascript; charset=utf-8",
+}
+
+_CHAT_SYSTEM_PROMPT = (
+    "You are GLM 5.2 operating inside the SelfHarness console as a development assistant. "
+    "Be concise and concrete. When asked to write or change code, produce minimal, correct edits."
+)
+
+# Directory names skipped when copying this repo into a dev-task workspace: large, regenerable, or
+# secret. Keeps "use this repo as the workspace" fast and avoids leaking the venv / credentials.
+_REPO_COPY_SKIP = {
+    ".git",
+    ".venv",
+    "runs",
+    "var",
+    "dist",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+}
 
 
 @dataclass
@@ -51,14 +90,41 @@ class UiJob:
     events: list[str] = field(default_factory=list)
     token_usage: dict[str, int] = field(default_factory=dict)
     proposer_mode: str = "heuristic"
+    run_mode: str = "deterministic"
+    source_promotion: dict[str, Any] | None = None
 
 
 class HarnessUiApp:
-    def __init__(self, *, root: Path, runs_dir: Path, proposer_mode: str = "heuristic") -> None:
+    def __init__(
+        self,
+        *,
+        root: Path,
+        runs_dir: Path,
+        proposer_mode: str = "heuristic",
+        harness_state: Path | None = None,
+        max_steps: int = 12,
+        tool_timeout_seconds: int = 30,
+        codex_binary: str = "codex",
+        auto_promote_to_source: bool = True,
+    ) -> None:
         self.root = root.resolve()
         self.runs_dir = _resolve_child(self.root, runs_dir)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.proposer_mode = _normalize_proposer_mode(proposer_mode)
+        # Persisted/evolving harness lineage: promoted edits are written here and auto-loaded as the
+        # starting harness for the next run, so the harness genuinely evolves across runs and sessions.
+        self.harness_state = (
+            _resolve_child(self.root, harness_state)
+            if harness_state is not None
+            else self.runs_dir / "harness_state.json"
+        )
+        self.max_steps = max_steps
+        self.tool_timeout_seconds = tool_timeout_seconds
+        self.codex_binary = codex_binary
+        # When the acceptance gate (the reviewer: Δin≥0 ∧ Δho≥0 ∧ max>0) promotes an edit, integrate it
+        # straight into harness.py — no separate manual approval. The correctness gate (ruff/mypy/import
+        # round-trip) still runs and auto-restores on failure, so source is never left broken.
+        self.auto_promote_to_source = auto_promote_to_source
         self._lock = threading.Lock()
         self._jobs: dict[str, UiJob] = {}
 
@@ -74,6 +140,8 @@ class HarnessUiApp:
             "runs": self.list_runs(),
             "proposer_mode": self.proposer_mode,
             "model": "glm-5.2" if self.proposer_mode == "glm" else None,
+            "harness_state": self._harness_state_status(),
+            "auto_promote_to_source": self.auto_promote_to_source,
             "reproduction_claimed": False,
         }
 
@@ -81,10 +149,14 @@ class HarnessUiApp:
         runs: list[dict[str, Any]] = []
         if not self.runs_dir.exists():
             return runs
+        # Map run_id -> live job status so a run still being produced reads as "running", not "error"
+        # (its lineage.json doesn't exist yet, which would otherwise look like an audit failure).
+        with self._lock:
+            job_status = {job.run_id: job.status for job in self._jobs.values()}
         for path in sorted(self.runs_dir.iterdir(), key=lambda item: _mtime(item), reverse=True):
             if not path.is_dir() or not (path / "manifest.json").is_file():
                 continue
-            runs.append(_run_listing(path))
+            runs.append(_run_listing(path, job_status.get(path.name)))
         return runs
 
     def run_detail(self, run_id: str) -> dict[str, Any]:
@@ -173,6 +245,136 @@ class HarnessUiApp:
                     return dict(job.token_usage)
         return {}
 
+    def chat(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Single-shot GLM 5.2 chat — direct access to the model, independent of the harness loop.
+
+        The request carries the prior turns as ``messages`` (role/content); the latest user turn is the
+        prompt and everything before it is folded into the system context so a plain chat-completions call
+        stays stateless on the server.
+        """
+
+        from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
+
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("messages must be a non-empty list")
+        turns: list[tuple[str, str]] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                raise ValueError("each message must be an object")
+            role = str(item.get("role", "")).strip().lower()
+            content = item.get("content")
+            if role not in {"user", "assistant", "system"} or not isinstance(content, str):
+                raise ValueError("each message needs a role (user/assistant/system) and string content")
+            turns.append((role, content))
+        if turns[-1][0] != "user":
+            raise ValueError("the final message must be a user turn")
+
+        system_text = payload.get("system")
+        system_prompt = system_text if isinstance(system_text, str) and system_text.strip() else _CHAT_SYSTEM_PROMPT
+        history = turns[:-1]
+        if history:
+            transcript = "\n".join(f"{role}: {content}" for role, content in history)
+            system_prompt = f"{system_prompt}\n\nConversation so far:\n{transcript}"
+        user_prompt = turns[-1][1]
+
+        api_key = resolve_zai_api_key()
+        base_url = resolve_zai_base_url()
+        usage: dict[str, int] = {}
+        client = GLMClient(
+            transport=build_zai_transport(base_url=base_url, api_key=api_key),
+            max_tokens=2048,
+            temperature=0.2,
+            on_usage=lambda counts: usage.update(counts),
+        )
+        reply = client.complete(system_prompt, user_prompt)
+        return {
+            "schema_version": UI_SCHEMA_VERSION,
+            "model": "glm-5.2",
+            "reply": reply,
+            "token_usage": usage,
+            "reproduction_claimed": False,
+        }
+
+    def dev_task(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Run GLM 5.2 as a real dev agent on a single user-described task, judged by Codex.
+
+        This is the 'use GLM for development' surface: the caller supplies instructions + success criteria
+        (and optionally seed files, or asks to use this repo as the workspace). GLM solves with real
+        bash/read_file/write_file tools in an isolated copy, Codex grades the result. No harness mutation.
+        """
+
+        from self_harness.adapters.agentic.agent_loop import run_agent_loop
+        from self_harness.adapters.agentic.codex_verifier import CodexVerifier
+        from self_harness.adapters.llm.messages import AnthropicAgentTransport
+        from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
+        from self_harness.harness import initial_harness
+
+        instructions = payload.get("instructions")
+        success_criteria = payload.get("success_criteria")
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise ValueError("instructions must be a non-empty string")
+        if not isinstance(success_criteria, str) or not success_criteria.strip():
+            raise ValueError("success_criteria must be a non-empty string")
+        workspace_files = payload.get("workspace_files")
+        if workspace_files is not None and (
+            not isinstance(workspace_files, dict)
+            or not all(isinstance(k, str) and isinstance(v, str) for k, v in workspace_files.items())
+        ):
+            raise ValueError("workspace_files must be an object of string paths to string contents")
+        use_repo = bool(payload.get("use_repo", False))
+        max_steps = _int_payload(payload, "max_steps", default=self.max_steps, minimum=1, maximum=40)
+
+        spec = self._load_persisted_harness() or initial_harness()
+        api_key = resolve_zai_api_key()
+        base_url = resolve_zai_base_url()
+
+        workdir = Path(tempfile.mkdtemp(prefix="self-harness-devtask-"))
+        try:
+            if use_repo:
+                _seed_repo_workspace(self.root, workdir)
+            if workspace_files:
+                _seed_workspace_files(workspace_files, workdir)
+            system_prompt = render_system_prompt(spec)
+            task_prompt = (
+                f"{instructions.strip()}\n\n"
+                "Work in the current directory. Use the available tools to inspect, edit, and verify."
+            )
+            loop = run_agent_loop(
+                transport=AnthropicAgentTransport(base_url=base_url, api_key=api_key, model="glm-5.2"),
+                system_prompt=system_prompt,
+                task_prompt=task_prompt,
+                workdir=workdir,
+                env=dict(os.environ),
+                max_steps=max_steps,
+                tool_timeout_seconds=self.tool_timeout_seconds,
+            )
+            verdict = CodexVerifier(binary=self.codex_binary).judge(
+                success_criteria=success_criteria,
+                task_description=instructions,
+                workdir=workdir,
+            )
+            return {
+                "schema_version": UI_SCHEMA_VERSION,
+                "model": "glm-5.2",
+                "passed": verdict.passed,
+                "verdict": {
+                    "passed": verdict.passed,
+                    "mechanism": verdict.mechanism,
+                    "message": verdict.message,
+                },
+                "stop_reason": loop.stop_reason,
+                "steps": loop.steps,
+                "tool_calls": loop.tool_calls,
+                "final_text": loop.final_text,
+                "trajectory": [to_jsonable(event) for event in loop.trace],
+                "token_usage": dict(loop.usage),
+                "used_repo_workspace": use_repo,
+                "reproduction_claimed": False,
+            }
+        finally:
+            shutil.rmtree(workdir, ignore_errors=True)
+
 
     def start_run(self, payload: dict[str, Any]) -> dict[str, Any]:
         config = {
@@ -182,6 +384,8 @@ class HarnessUiApp:
             "max_proposals": _int_payload(payload, "max_proposals", default=8, minimum=1, maximum=64),
             "max_payload_bytes": _int_payload(payload, "max_payload_bytes", default=600, minimum=32, maximum=10_000),
         }
+        run_mode = _normalize_run_mode(payload.get("run_mode", "deterministic"))
+        evolve = bool(payload.get("evolve", True))
         run_id = _run_id()
         job = UiJob(
             id=str(uuid.uuid4()),
@@ -192,14 +396,21 @@ class HarnessUiApp:
             created_at=_now(),
             events=["queued"],
             proposer_mode=self.proposer_mode,
+            run_mode=run_mode,
         )
         with self._lock:
             self._jobs[job.id] = job
-        thread = threading.Thread(target=self._run_job, args=(job.id,), name=f"self-harness-ui-{run_id}", daemon=True)
+        thread = threading.Thread(
+            target=self._run_job,
+            args=(job.id,),
+            kwargs={"evolve": evolve},
+            name=f"self-harness-ui-{run_id}",
+            daemon=True,
+        )
         thread.start()
         return _job_to_jsonable(job)
 
-    def _run_job(self, job_id: str) -> None:
+    def _run_job(self, job_id: str, *, evolve: bool = True) -> None:
         with self._lock:
             job = self._jobs[job_id]
             job.status = "running"
@@ -207,7 +418,63 @@ class HarnessUiApp:
             job.events.append("running")
             config = dict(job.config)
             path = job.path
+            run_mode = job.run_mode
         try:
+            usage_lock = self._lock
+
+            def _accumulate_usage(counts: dict[str, int]) -> None:
+                with usage_lock:
+                    accumulated = self._jobs[job_id].token_usage
+                    for key, value in counts.items():
+                        accumulated[key] = accumulated.get(key, 0) + value
+
+            initial_spec = self._load_persisted_harness() if evolve else None
+            engine = self._build_engine(
+                run_mode=run_mode,
+                config=config,
+                out_dir=path,
+                initial_spec=initial_spec,
+                on_usage=_accumulate_usage,
+            )
+            summaries = engine.run()
+            promotion: dict[str, Any] | None = None
+            if evolve:
+                self._persist_final_harness(path, summaries)
+                promotion = self._auto_promote(path, summaries)
+            summary = to_jsonable(summarize_audit_run(path))
+            with self._lock:
+                job = self._jobs[job_id]
+                job.status = "completed"
+                job.ended_at = _now()
+                job.summary = summary
+                job.source_promotion = promotion
+                job.events.append("completed")
+        except Exception as exc:
+            with self._lock:
+                job = self._jobs[job_id]
+                job.status = "failed"
+                job.ended_at = _now()
+                job.error = str(exc)
+                job.events.append("failed")
+
+    def _build_engine(
+        self,
+        *,
+        run_mode: str,
+        config: dict[str, int],
+        out_dir: Path,
+        initial_spec: HarnessSpec | None,
+        on_usage: Callable[[dict[str, int]], None],
+    ) -> SelfHarnessEngine:
+        """Construct the engine for the requested run mode.
+
+        ``deterministic`` uses the deterministic runner over ``demo_tasks`` (fast, offline, byte-reproducible
+        — used by the test suite and the ``demo`` CLI). ``agentic`` uses GLM 5.2 as a real tool-using solver
+        judged by Codex — harness edits change genuine task-success rates, so the acceptance gate promotes
+        edits that truly help. The console launches agentic runs.
+        """
+
+        if run_mode == "deterministic":
             engine_config = EngineConfig(
                 rounds=config["rounds"],
                 seed=config["seed"],
@@ -217,36 +484,258 @@ class HarnessUiApp:
                     max_payload_bytes=config["max_payload_bytes"],
                 ),
             )
-            usage_lock = self._lock
-
-            def _accumulate_usage(counts: dict[str, int]) -> None:
-                with usage_lock:
-                    accumulated = self._jobs[job_id].token_usage
-                    for key, value in counts.items():
-                        accumulated[key] = accumulated.get(key, 0) + value
-
-            engine = SelfHarnessEngine(
+            return SelfHarnessEngine(
                 tasks=demo_tasks(),
-                runner=ToyRunner(seed=config["seed"]),
-                proposer=_build_proposer(self.proposer_mode, on_usage=_accumulate_usage),
-                out_dir=path,
+                runner=DeterministicRunner(seed=config["seed"]),
+                proposer=_build_proposer(self.proposer_mode, on_usage=on_usage),
+                out_dir=out_dir,
                 config=engine_config,
+                initial_spec=initial_spec,
             )
-            engine.run()
-            summary = to_jsonable(summarize_audit_run(path))
-            with self._lock:
-                job = self._jobs[job_id]
-                job.status = "completed"
-                job.ended_at = _now()
-                job.summary = summary
-                job.events.append("completed")
-        except Exception as exc:
-            with self._lock:
-                job = self._jobs[job_id]
-                job.status = "failed"
-                job.ended_at = _now()
-                job.error = str(exc)
-                job.events.append("failed")
+        if run_mode == "agentic":
+            return self._build_agentic_engine(
+                config=config,
+                out_dir=out_dir,
+                initial_spec=initial_spec,
+                on_usage=on_usage,
+            )
+        raise ValueError(f"unsupported run mode: {run_mode}")
+
+    def _build_agentic_engine(
+        self,
+        *,
+        config: dict[str, int],
+        out_dir: Path,
+        initial_spec: HarnessSpec | None,
+        on_usage: Callable[[dict[str, int]], None],
+        corpus_path: Path | None = None,
+    ) -> SelfHarnessEngine:
+        from self_harness.agentic_session import (
+            build_agentic_adapter,
+            build_agentic_config,
+            build_proposer,
+            resolve_zai_api_key,
+            resolve_zai_base_url,
+        )
+        from self_harness.corpus import load_corpus
+
+        api_key = resolve_zai_api_key()
+        base_url = resolve_zai_base_url()
+        engine_config = build_agentic_config(
+            rounds=config["rounds"],
+            seed=config["seed"],
+            evaluation_repeats=config["evaluation_repeats"],
+            max_proposals=config["max_proposals"],
+            max_payload_bytes=config["max_payload_bytes"],
+        )
+        adapter = build_agentic_adapter(
+            api_key=api_key,
+            base_url=base_url,
+            max_steps=self.max_steps,
+            tool_timeout_seconds=self.tool_timeout_seconds,
+            codex_binary=self.codex_binary,
+            keep_workdir=False,
+        )
+        corpus = load_corpus(corpus_path or self._default_agentic_corpus(), allow_legacy=False)
+        # The agentic proposer is always GLM 5.2 (within-model setup); the solver token usage lands in
+        # RunRecord metadata, while the proposer's tokens flow through on_usage.
+        proposer = build_proposer("glm", api_key=api_key, base_url=base_url, on_usage=on_usage)
+        return SelfHarnessEngine(
+            tasks=adapter.load(corpus),
+            runner=adapter.runner(),
+            proposer=proposer,
+            out_dir=out_dir,
+            config=engine_config,
+            initial_spec=initial_spec,
+        )
+
+    def _default_agentic_corpus(self) -> Path:
+        candidate = self.root / "examples" / "agentic_corpus.json"
+        if candidate.is_file():
+            return candidate
+        raise FileNotFoundError(
+            "no agentic corpus available; expected examples/agentic_corpus.json under the UI root"
+        )
+
+    def _load_persisted_harness(self) -> HarnessSpec | None:
+        if not self.harness_state.is_file():
+            return None
+        try:
+            value = json.loads(self.harness_state.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        surfaces = value.get("harness") if isinstance(value, dict) else None
+        if not isinstance(surfaces, dict):
+            return None
+        try:
+            return load_harness_spec(surfaces)
+        except InvalidPatchError:
+            return None
+
+    def _final_harness_spec(self, run_path: Path) -> HarnessSpec | None:
+        """Load the run's final harness from the last round's harness_after.json (raw surface dict)."""
+
+        rounds_dir = run_path / "rounds"
+        if not rounds_dir.is_dir():
+            return None
+        round_indices = sorted(
+            (int(p.name) for p in rounds_dir.iterdir() if p.is_dir() and p.name.isdigit()),
+        )
+        for index in reversed(round_indices):
+            snapshot = rounds_dir / str(index) / "harness_after.json"
+            if not snapshot.is_file():
+                continue
+            try:
+                surfaces = json.loads(snapshot.read_text(encoding="utf-8"))
+                return load_harness_spec(surfaces)
+            except (OSError, json.JSONDecodeError, InvalidPatchError):
+                return None
+        return None
+
+    def _persist_final_harness(self, run_path: Path, summaries: list[Any]) -> None:
+        # Only advance the persisted lineage when this run actually promoted an edit, so a no-op run never
+        # rewrites the evolving harness with an identical (or, on a bad read, reset) snapshot.
+        promoted = any(getattr(summary, "accepted", 0) for summary in summaries)
+        if not promoted:
+            return
+        spec = self._final_harness_spec(run_path)
+        if spec is None:
+            return
+        payload = {
+            "schema_version": UI_SCHEMA_VERSION,
+            "updated_at": _now(),
+            "source_run": run_path.name,
+            "harness_hash": harness_hash(spec),
+            "harness": dump_harness_spec(spec),
+        }
+        self.harness_state.parent.mkdir(parents=True, exist_ok=True)
+        write_stable_json(self.harness_state, payload)
+
+    def _auto_promote(self, run_path: Path, summaries: list[Any]) -> dict[str, Any] | None:
+        """Integrate reviewer-approved edits into source automatically (no manual approval step).
+
+        The "reviewer" is the engine's acceptance gate (Δin≥0 ∧ Δho≥0 ∧ max>0). If it promoted at least one
+        edit this run, write the evolved harness back into harness.py via the same correctness-gated path the
+        manual button uses. Returns the promotion result (or None when nothing was accepted / disabled).
+        """
+
+        if not self.auto_promote_to_source:
+            return None
+        promoted = any(getattr(summary, "accepted", 0) for summary in summaries)
+        if not promoted:
+            return None
+        spec = self._final_harness_spec(run_path)
+        if spec is None:
+            return None
+        try:
+            return self._promote_spec_to_source(spec, write=True)
+        except (OSError, ValueError, InvalidPatchError) as exc:
+            return {"ok": False, "applied": False, "message": f"auto-integration failed: {exc}"}
+
+    def _harness_state_status(self) -> dict[str, Any]:
+        if not self.harness_state.is_file():
+            return {"evolving": False, "source_run": None, "harness_hash": None, "updated_at": None}
+        try:
+            value = json.loads(self.harness_state.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {"evolving": False, "source_run": None, "harness_hash": None, "updated_at": None}
+        return {
+            "evolving": isinstance(value.get("harness"), dict),
+            "source_run": value.get("source_run"),
+            "harness_hash": value.get("harness_hash"),
+            "updated_at": value.get("updated_at"),
+        }
+
+    def reset_harness_state(self) -> dict[str, Any]:
+        """Discard the evolving lineage so the next run starts from initial_harness() (Figure 3)."""
+
+        try:
+            self.harness_state.unlink()
+        except FileNotFoundError:
+            pass
+        return {"schema_version": UI_SCHEMA_VERSION, "ok": True, "harness_state": self._harness_state_status()}
+
+    def promote_to_source(self, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Write a run's final (evolved) harness back into ``harness.py``'s ``initial_harness()``.
+
+        This closes the self-improvement loop into real source. Reviewer-approved edits are integrated by
+        default: passing no ``apply`` (or ``{"apply": true}``) writes and gates immediately. Pass
+        ``{"apply": false}`` for a dry-run preview that only returns the diff without touching source.
+
+        The write itself stays correctness-checked, not approval-gated: it computes a unified diff, backs up
+        the original to ``harness.py.bak``, rewrites the marker block, and runs the gate (ruff + mypy + an
+        import round-trip). If the gate fails the original is restored automatically, so a bad rewrite can
+        never be left in the tree.
+        """
+
+        run_path = self._run_path(run_id)
+        spec = self._final_harness_spec(run_path)
+        if spec is None:
+            raise ValueError("run has no final harness to promote")
+
+        result = self._promote_spec_to_source(spec, write=bool(payload.get("apply", True)))
+        result["run_id"] = run_id
+        return result
+
+    def _promote_spec_to_source(self, spec: HarnessSpec, *, write: bool) -> dict[str, Any]:
+        """Render ``spec`` into ``harness.py``'s ``initial_harness()`` and (optionally) write + gate it.
+
+        Shared by the promote endpoint and the post-run auto-integration path. ``write=False`` returns the
+        diff only (dry-run preview). ``write=True`` backs up, rewrites the marker block, runs the gate, and
+        restores from backup if the gate fails — so source is never left in a broken state.
+        """
+
+        import difflib
+
+        harness_path = self.root / "src" / "self_harness" / "harness.py"
+        if not harness_path.is_file():
+            raise FileNotFoundError("cannot locate src/self_harness/harness.py under the UI root")
+        original = harness_path.read_text(encoding="utf-8")
+        new_block = render_initial_harness_source(spec)
+        rewritten = _replace_marked_block(
+            original,
+            INITIAL_HARNESS_START_MARKER,
+            INITIAL_HARNESS_END_MARKER,
+            new_block,
+        )
+        diff = "".join(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                rewritten.splitlines(keepends=True),
+                fromfile="harness.py",
+                tofile="harness.py (promoted)",
+            )
+        )
+        result: dict[str, Any] = {
+            "schema_version": UI_SCHEMA_VERSION,
+            "harness_hash": harness_hash(spec),
+            "diff": diff,
+            "changed": rewritten != original,
+            "applied": False,
+            "reproduction_claimed": False,
+        }
+        if not write:
+            result["ok"] = True
+            result["message"] = "dry-run: pass {\"apply\": true} to write and gate"
+            return result
+        if rewritten == original:
+            result["ok"] = True
+            result["message"] = "final harness already equals source initial_harness(); nothing to write"
+            return result
+
+        backup_path = harness_path.with_suffix(".py.bak")
+        backup_path.write_text(original, encoding="utf-8")
+        harness_path.write_text(rewritten, encoding="utf-8")
+        gate = _run_source_gate(self.root, harness_hash(spec))
+        if gate["ok"]:
+            result.update(ok=True, applied=True, backup=str(backup_path), gate=gate)
+            result["message"] = "promoted to source; gate passed"
+        else:
+            harness_path.write_text(original, encoding="utf-8")
+            backup_path.unlink(missing_ok=True)
+            result.update(ok=False, applied=False, gate=gate)
+            result["message"] = "gate failed; source restored from backup"
+        return result
 
     def _run_path(self, run_id: str) -> Path:
         if Path(run_id).name != run_id or run_id in {"", ".", ".."}:
@@ -259,8 +748,29 @@ class HarnessUiApp:
         return path
 
 
-def serve_ui(*, host: str, port: int, root: Path, runs_dir: Path, proposer_mode: str = "heuristic") -> int:
-    app = HarnessUiApp(root=root, runs_dir=runs_dir, proposer_mode=proposer_mode)
+def serve_ui(
+    *,
+    host: str,
+    port: int,
+    root: Path,
+    runs_dir: Path,
+    proposer_mode: str = "heuristic",
+    harness_state: Path | None = None,
+    max_steps: int = 12,
+    tool_timeout_seconds: int = 30,
+    codex_binary: str = "codex",
+    auto_promote_to_source: bool = True,
+) -> int:
+    app = HarnessUiApp(
+        root=root,
+        runs_dir=runs_dir,
+        proposer_mode=proposer_mode,
+        harness_state=harness_state,
+        max_steps=max_steps,
+        tool_timeout_seconds=tool_timeout_seconds,
+        codex_binary=codex_binary,
+        auto_promote_to_source=auto_promote_to_source,
+    )
     server = ThreadingHTTPServer((host, port), _make_handler(app))
     print(f"SelfHarness UI listening on http://{host}:{server.server_port} proposer={app.proposer_mode}")
     try:
@@ -281,6 +791,9 @@ def _make_handler(app: HarnessUiApp) -> type[BaseHTTPRequestHandler]:
             try:
                 if parsed.path == "/":
                     self._send_html(_HTML)
+                    return
+                if parsed.path.startswith("/static/"):
+                    self._send_static(parsed.path.removeprefix("/static/"))
                     return
                 if parsed.path == "/api/state":
                     self._send_json(app.state())
@@ -314,6 +827,19 @@ def _make_handler(app: HarnessUiApp) -> type[BaseHTTPRequestHandler]:
                     payload = self._read_json()
                     self._send_json(app.start_run(payload), status=HTTPStatus.ACCEPTED)
                     return
+                if parsed.path == "/api/chat":
+                    self._send_json(app.chat(self._read_json()))
+                    return
+                if parsed.path == "/api/dev-task":
+                    self._send_json(app.dev_task(self._read_json()))
+                    return
+                if parsed.path == "/api/harness/reset":
+                    self._send_json(app.reset_harness_state())
+                    return
+                if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/promote-to-source"):
+                    run_id = parsed.path.removeprefix("/api/runs/").removesuffix("/promote-to-source").strip("/")
+                    self._send_json(app.promote_to_source(run_id, self._read_json()))
+                    return
                 self._send_error(HTTPStatus.NOT_FOUND, "unknown route")
             except Exception as exc:
                 self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
@@ -339,6 +865,26 @@ def _make_handler(app: HarnessUiApp) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(encoded)))
             self.end_headers()
             self.wfile.write(encoded)
+
+        def _send_static(self, name: str) -> None:
+            # Vendored front-end assets only: a strict allowlist keeps this off the filesystem-traversal
+            # path entirely (the console must work offline, so Alpine is served locally rather than via CDN).
+            content_type = _STATIC_ASSETS.get(name)
+            if content_type is None:
+                self._send_error(HTTPStatus.NOT_FOUND, "unknown asset")
+                return
+            asset = _STATIC_DIR / name
+            try:
+                payload = asset.read_bytes()
+            except OSError:
+                self._send_error(HTTPStatus.NOT_FOUND, "asset unavailable")
+                return
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
 
         def _send_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
             encoded = (stable_json_dumps(payload) + "\n").encode("utf-8")
@@ -368,13 +914,101 @@ def _resolve_child(root: Path, child: Path) -> Path:
     return path.resolve()
 
 
+def _seed_repo_workspace(root: Path, workdir: Path) -> None:
+    """Copy this repo into the dev-task workspace, skipping heavy/secret dirs.
+
+    GLM edits a *copy*, never the live tree — consistent with the per-attempt workdir model and the host
+    decision (no in-place mutation, which would need container isolation).
+    """
+
+    for entry in root.iterdir():
+        if entry.name in _REPO_COPY_SKIP or entry.name.startswith(".env"):
+            continue
+        target = workdir / entry.name
+        if entry.is_dir():
+            shutil.copytree(
+                entry,
+                target,
+                ignore=shutil.ignore_patterns(*_REPO_COPY_SKIP, ".env*"),
+                dirs_exist_ok=True,
+            )
+        else:
+            shutil.copy2(entry, target)
+
+
+def _seed_workspace_files(files: dict[str, str], workdir: Path) -> None:
+    """Write inline {relative_path: content} files, confining every target inside the workspace."""
+
+    for rel, content in files.items():
+        target = (workdir / rel).resolve()
+        if workdir not in target.parents and target != workdir:
+            raise ValueError(f"workspace file escapes workspace: {rel}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+
+
+def _replace_marked_block(source: str, start_marker: str, end_marker: str, new_block: str) -> str:
+    start = source.find(start_marker)
+    end = source.find(end_marker)
+    if start == -1 or end == -1 or end < start:
+        raise ValueError("initial_harness() marker block not found in harness.py")
+    end_full = end + len(end_marker)
+    return source[:start] + new_block + source[end_full:]
+
+
+def _run_source_gate(root: Path, expected_hash: str) -> dict[str, Any]:
+    """Validate a promoted harness.py rewrite: ruff + mypy + a fresh-process import round-trip.
+
+    The import check runs in a subprocess so it picks up the just-written source (not the already-imported
+    module), reconstructs ``initial_harness()``, and confirms it hashes to the promoted spec. Baseline-
+    coupled test suites are intentionally NOT run here: a promoted harness is, by design, no longer the
+    Figure-3 baseline those fixtures assume, so running them would always fail a valid promotion.
+    """
+
+    import subprocess
+
+    python = root / ".venv" / "bin" / "python"
+    interpreter = str(python) if python.is_file() else "python3"
+    roundtrip = (
+        "import sys; from self_harness.harness import initial_harness, harness_hash; "
+        f"sys.exit(0 if harness_hash(initial_harness()) == {expected_hash!r} else 17)"
+    )
+    checks = [
+        ("ruff", [interpreter, "-m", "ruff", "check", "src/self_harness/harness.py"]),
+        ("mypy", [interpreter, "-m", "mypy", "src/self_harness/harness.py"]),
+        ("import-roundtrip", [interpreter, "-c", roundtrip]),
+    ]
+    results: list[dict[str, Any]] = []
+    ok = True
+    for name, cmd in checks:
+        try:
+            proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=300)
+            passed = proc.returncode == 0
+            tail = (proc.stdout + proc.stderr).strip().splitlines()[-12:]
+            results.append({"name": name, "ok": passed, "output": "\n".join(tail)})
+            ok = ok and passed
+        except (OSError, subprocess.SubprocessError) as exc:
+            results.append({"name": name, "ok": False, "output": f"{name} could not run: {exc}"})
+            ok = False
+    return {"ok": ok, "checks": results}
+
+
 def _normalize_proposer_mode(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized in {"heuristic", "toy"}:
+    if normalized in {"heuristic", "deterministic"}:
         return "heuristic"
     if normalized in {"glm", "glm-5.2", "zai", "z.ai"}:
         return "glm"
     raise ValueError("proposer_mode must be heuristic or glm")
+
+
+def _normalize_run_mode(value: Any) -> str:
+    normalized = str(value).strip().lower()
+    if normalized in {"deterministic", "", "demo"}:
+        return "deterministic"
+    if normalized in {"agentic", "glm", "real"}:
+        return "agentic"
+    raise ValueError("run_mode must be deterministic or agentic")
 
 
 def _glm_status(mode: str, ok: bool, detail: str) -> str:
@@ -439,18 +1073,21 @@ def _build_proposer(
     raise ValueError(f"unsupported proposer mode: {mode}")
 
 
-def _run_listing(path: Path) -> dict[str, Any]:
+def _run_listing(path: Path, job_status: str | None = None) -> dict[str, Any]:
     try:
         summary: dict[str, Any] | None = to_jsonable(summarize_audit_run(path))
         error = None
     except Exception as exc:
         summary = None
-        error = str(exc)
+        # A run whose job is still active simply hasn't written its audit artifacts yet — surface that as
+        # "running", not as an audit error, so the UI badge doesn't cry wolf during long agentic runs.
+        error = None if job_status in {"queued", "running"} else str(exc)
     return {
         "id": path.name,
         "path": str(path),
         "updated_at": _timestamp(_mtime(path)),
         "summary": summary,
+        "status": job_status,
         "error": error,
         "reproduction_claimed": False,
     }
@@ -471,6 +1108,8 @@ def _job_to_jsonable(job: UiJob) -> dict[str, Any]:
         "events": list(job.events),
         "token_usage": dict(job.token_usage),
         "proposer_mode": job.proposer_mode,
+        "run_mode": job.run_mode,
+        "source_promotion": job.source_promotion,
     }
 
 
@@ -510,7 +1149,7 @@ _HTML = r"""<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SelfHarness Console</title>
-  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <script defer src="/static/alpine-3.14.1.min.js"></script>
   <style>
     :root {
       --bg: #0d1117; --bg-2: #161b22; --panel: #11161d; --panel-2: #1b222c;
@@ -639,6 +1278,23 @@ _HTML = r"""<!doctype html>
 <body>
   <noscript><div class="nojs">The SelfHarness console requires JavaScript. The JSON API is available at <code>/api/state</code>, <code>/api/preflight</code>, and <code>/api/runs/&lt;id&gt;</code>.</div></noscript>
 
+  <div id="sh-load-error" style="display:none; padding:22px; color:#f85149; font-family:ui-monospace,Menlo,monospace;">
+    SelfHarness console: the front-end framework (Alpine.js) failed to load from <code>/static/alpine-3.14.1.min.js</code>.
+    The page cannot become interactive. The raw JSON API is still available at
+    <code>/api/state</code>, <code>/api/preflight</code>, and <code>/api/runs/&lt;id&gt;</code>.
+  </div>
+  <script>
+    // Fail loud, never blank: if Alpine never initializes (vendored asset missing/corrupt), strip the
+    // x-cloak gate so the operator sees an explanation instead of an empty black page.
+    setTimeout(function () {
+      if (!window.Alpine) {
+        var err = document.getElementById('sh-load-error');
+        if (err) err.style.display = 'block';
+        document.querySelectorAll('[x-cloak]').forEach(function (el) { el.removeAttribute('x-cloak'); });
+      }
+    }, 1500);
+  </script>
+
   <header x-cloak>
     <div class="brand">
       <div class="logo">SH</div>
@@ -663,17 +1319,21 @@ _HTML = r"""<!doctype html>
         <div class="card-h"><h2>New run</h2></div>
         <div class="card-b">
           <div class="field">
-            <label>Proposer backend</label>
-            <div class="seg">
-              <button :class="{on: form.proposer==='heuristic'}" @click="form.proposer='heuristic'">Heuristic (toy)</button>
-              <button :class="{on: form.proposer==='glm'}" @click="form.proposer='glm'" :disabled="!glm.key_present" :title="glm.key_present ? '' : 'Set ZAI_API_KEY and restart with --proposer glm'">GLM 5.2</button>
+            <label>Run mode</label>
+            <div class="muted" style="font-size:12px;">GLM 5.2 solves real tasks with bash/file tools on this host (no container); Codex judges. Promoted edits change genuine pass rates.</div>
+            <div class="muted" style="font-size:12px; margin-top:6px; color: var(--warn);" x-show="!glm.key_present">Set ZAI_API_KEY and restart to enable runs.</div>
+          </div>
+          <div class="field">
+            <label>Harness lineage</label>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <label style="display:flex; gap:6px; align-items:center; font-size:13px; color:var(--ink);">
+                <input type="checkbox" style="width:auto" x-model="form.evolve"> evolve from persisted
+              </label>
+              <span class="spacer"></span>
+              <button class="ghost tiny" @click="resetHarness()" :disabled="!harnessState.evolving" title="Discard the evolving lineage; next run starts from initial_harness()">Reset</button>
             </div>
             <div class="muted" style="font-size:12px; margin-top:6px;"
-                 x-show="form.proposer==='glm'"
-                 x-text="glm.status==='operational' ? 'GLM 5.2 live and funded.' : (glm.status==='needs_funding' ? 'GLM 5.2 reachable — Z.ai account needs funding (code 1113).' : 'GLM proposer selected.')"></div>
-            <div class="muted" style="font-size:12px; margin-top:6px;" x-show="serverProposer !== form.proposer && form.proposer==='glm'">
-              Note: this server was started with proposer=<b x-text="serverProposer"></b>. Runs use the server's backend; restart with <code>--proposer glm</code> to launch GLM runs.
-            </div>
+                 x-text="harnessState.evolving ? ('Evolving from ' + (harnessState.source_run||'?') + ' · ' + (harnessState.harness_hash||'').slice(0,12)) : 'Starting from initial_harness() (Figure 3).'"></div>
           </div>
           <div class="grid2">
             <div class="field"><label>Rounds</label><input type="number" min="1" max="20" x-model.number="form.rounds"></div>
@@ -696,7 +1356,7 @@ _HTML = r"""<!doctype html>
                   <div class="id mono" x-text="r.id"></div>
                   <div class="muted" style="font-size:12px" x-text="runScore(r)"></div>
                 </div>
-                <span class="badge" :class="r.error ? 'rejected' : 'accepted'" x-text="r.error ? 'error' : 'audit'"></span>
+                <span class="badge" :class="runBadgeClass(r)" x-text="runBadge(r)"></span>
               </div>
             </template>
             <div class="empty" x-show="runs.length===0">No runs yet. Start one above.</div>
@@ -717,9 +1377,13 @@ _HTML = r"""<!doctype html>
     <!-- RIGHT: detail -->
     <section class="card" style="min-height: 60vh;">
       <div class="card-h">
-        <h2 x-text="selectedId ? ('Run ' + selectedId) : 'Run detail'"></h2>
+        <div class="tabs">
+          <button :class="{on: view==='runs'}" @click="view='runs'">Runs</button>
+          <button :class="{on: view==='devtask'}" @click="view='devtask'">Dev task</button>
+          <button :class="{on: view==='chat'}" @click="view='chat'">Chat</button>
+        </div>
         <span class="spacer"></span>
-        <div class="tabs" x-show="selectedId">
+        <div class="tabs" x-show="view==='runs' && selectedId">
           <button :class="{on: tab==='overview'}" @click="tab='overview'">Overview</button>
           <button :class="{on: tab==='trajectory'}" @click="tab='trajectory'">Trajectory</button>
           <button :class="{on: tab==='round'}" @click="tab='round'" x-show="roundData">Round <span x-text="roundData ? roundData.round : ''"></span></button>
@@ -728,7 +1392,7 @@ _HTML = r"""<!doctype html>
         </div>
       </div>
       <div class="card-b">
-        <div class="banner" :class="glm.status" x-show="form.proposer==='glm' || glm.status==='needs_funding'">
+        <div class="banner" :class="glm.status" x-show="view!=='runs' || glm.status==='needs_funding' || glm.status==='operational'">
           <span class="dot" :class="glm.status"></span>
           <div>
             <div style="font-weight:700" x-text="glmLabel()"></div>
@@ -736,6 +1400,64 @@ _HTML = r"""<!doctype html>
           </div>
         </div>
 
+        <!-- ============ DEV TASK VIEW ============ -->
+        <div x-show="view==='devtask'">
+          <p class="muted" style="font-size:13px; margin-top:0;">Hand GLM 5.2 a development task. It solves with real <code>bash</code>/<code>read_file</code>/<code>write_file</code> tools in an isolated workspace; the Codex CLI judges the result. Runs under the current evolving harness.</p>
+          <div class="field"><label>Instructions (what GLM should do)</label><textarea rows="4" style="width:100%" x-model="dev.instructions" placeholder="e.g. Create fizzbuzz.py that prints 1..15 with Fizz/Buzz/FizzBuzz."></textarea></div>
+          <div class="field"><label>Success criteria (how Codex judges)</label><textarea rows="3" style="width:100%" x-model="dev.success_criteria" placeholder="e.g. fizzbuzz.py exists and python3 fizzbuzz.py prints the expected sequence."></textarea></div>
+          <div class="field">
+            <label style="display:flex; gap:8px; align-items:center;"><input type="checkbox" style="width:auto" x-model="dev.use_repo"> Use the SelfHarness repo as the workspace (a copy)</label>
+            <div class="muted" style="font-size:12px; margin-top:4px;">GLM edits a copy of this repo, never the live tree.</div>
+          </div>
+          <div class="field"><label>Max steps</label><input type="number" min="1" max="40" x-model.number="dev.max_steps" style="width:120px;"></div>
+          <button class="primary" @click="runDevTask()" :disabled="dev.running || !glm.key_present" x-text="dev.running ? 'GLM working…' : 'Run dev task'"></button>
+          <div x-show="dev.error" class="muted" style="color:var(--danger); margin-top:10px;" x-text="dev.error"></div>
+          <template x-if="dev.result">
+            <div style="margin-top:16px;">
+              <div class="scores">
+                <div class="stat"><div class="k">Verdict</div><div class="v" :class="dev.result.passed ? 'delta-up' : 'delta-down'" x-text="dev.result.passed ? 'PASS' : 'FAIL'"></div></div>
+                <div class="stat"><div class="k">Steps / tools</div><div class="v" x-text="dev.result.steps + ' / ' + dev.result.tool_calls"></div></div>
+                <div class="stat"><div class="k">Stop reason</div><div class="v" style="font-size:15px" x-text="dev.result.stop_reason"></div></div>
+                <div class="stat"><div class="k">Solver tokens</div><div class="v" x-text="(dev.result.token_usage.total_tokens||0).toLocaleString()"></div></div>
+              </div>
+              <p class="muted" style="font-size:12px; margin-top:10px;" x-text="'Judge: ' + (dev.result.verdict ? dev.result.verdict.message : '')"></p>
+              <h3 style="font-size:14px; margin:14px 0 8px;">Final message</h3>
+              <pre class="box" x-text="dev.result.final_text || '(none)'"></pre>
+              <h3 style="font-size:14px; margin:14px 0 8px;">Trajectory</h3>
+              <div class="traj">
+                <template x-for="(ev, i) in dev.result.trajectory" :key="i">
+                  <div class="run-row" style="cursor:default; display:block;">
+                    <div class="muted mono" style="font-size:11px;" x-text="ev.kind"></div>
+                    <pre class="box" style="font-size:12px; margin-top:4px;" x-text="(ev.message||'').slice(0,1200)"></pre>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- ============ CHAT VIEW ============ -->
+        <div x-show="view==='chat'">
+          <p class="muted" style="font-size:13px; margin-top:0;">Talk to GLM 5.2 directly. Single-shot calls with conversation context — independent of the harness loop.</p>
+          <div class="traj" style="max-height:50vh; overflow:auto; margin-bottom:12px;">
+            <template x-for="(m, i) in chat.messages" :key="i">
+              <div class="run-row" style="cursor:default; display:block;">
+                <div class="muted mono" style="font-size:11px;" x-text="m.role"></div>
+                <pre class="box" style="margin-top:4px;" x-text="m.content"></pre>
+              </div>
+            </template>
+            <div class="empty" x-show="chat.messages.length===0">No messages yet.</div>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <input style="flex:1" x-model="chat.input" @keydown.enter="sendChat()" placeholder="Ask GLM 5.2 something…">
+            <button class="primary" @click="sendChat()" :disabled="chat.sending || !glm.key_present" x-text="chat.sending ? '…' : 'Send'"></button>
+          </div>
+          <div x-show="chat.error" class="muted" style="color:var(--danger); margin-top:8px;" x-text="chat.error"></div>
+          <div class="muted" style="font-size:12px; margin-top:8px;" x-show="chat.usage.total_tokens" x-text="'Last turn: ' + chat.usage.total_tokens + ' tokens'"></div>
+        </div>
+
+        <!-- ============ RUNS VIEW ============ -->
+        <div x-show="view==='runs'">
         <div class="empty" x-show="!selectedId">Select a run to inspect its trajectory, proposals, evidence, and harness diff.</div>
 
         <!-- Overview -->
@@ -828,6 +1550,13 @@ _HTML = r"""<!doctype html>
           <template x-if="harnessData">
             <div>
               <p class="muted" style="font-size:12px; margin-top:0;">Initial (Figure 3) → final promoted harness. Changed surfaces are highlighted.</p>
+              <p class="muted" style="font-size:12px; margin-top:-4px;" x-show="autoPromote">Reviewer-approved edits are integrated into <span class="mono">harness.py</span> automatically when a run accepts an edit (correctness-gated: ruff + mypy + import round-trip, auto-restored on failure). Use the buttons below to preview or re-integrate manually.</p>
+              <div style="display:flex; gap:8px; align-items:center; margin-bottom:12px;">
+                <button class="tiny" @click="previewPromote()" :disabled="promote.busy">Preview diff</button>
+                <button class="primary tiny" @click="applyPromote()" :disabled="promote.busy || !promote.diff" x-text="promote.busy ? 'Working…' : 'Integrate into harness.py'"></button>
+                <span class="muted" style="font-size:12px;" x-show="promote.message" x-text="promote.message"></span>
+              </div>
+              <pre class="box mono" style="font-size:12px; max-height:30vh; overflow:auto;" x-show="promote.diff" x-text="promote.diff"></pre>
               <template x-for="name in surfaceNames()" :key="name">
                 <div class="surface" :class="{changed: surfaceChanged(name)}">
                   <div class="sh"><span x-text="name"></span><span class="badge" :class="surfaceChanged(name)?'accepted':'superseded'" x-text="surfaceChanged(name)?'changed':'unchanged'"></span></div>
@@ -845,11 +1574,12 @@ _HTML = r"""<!doctype html>
         <div x-show="selectedId && tab==='raw'">
           <pre class="box mono" style="font-size:12px" x-text="JSON.stringify(detail, null, 2)"></pre>
         </div>
+        </div><!-- /view==='runs' -->
       </div>
     </section>
   </main>
 
-  <div class="footer-note" x-cloak>SelfHarness is a paper-faithful toy implementation (arXiv:2606.09498). It does not claim Terminal-Bench reproduction. Model: <b>GLM 5.2</b> via Z.ai when configured.</div>
+  <div class="footer-note" x-cloak>SelfHarness is a paper-faithful implementation (arXiv:2606.09498). It does not claim Terminal-Bench reproduction. Model: <b>GLM 5.2</b> via Z.ai when configured.</div>
 
   <div class="toast" x-show="toast" x-transition x-cloak x-text="toast"></div>
 
@@ -860,8 +1590,13 @@ _HTML = r"""<!doctype html>
         glm: { status: 'not_checked', detail: '', key_present: false, mode: 'dry-run' },
         serverProposer: 'heuristic',
         runs: [], jobs: [], selectedId: null, detail: null, roundData: null, harnessData: null,
-        tab: 'overview', starting: false, toast: '',
-        form: { proposer: 'heuristic', rounds: 3, seed: 0, evaluation_repeats: 2, max_proposals: 8, max_payload_bytes: 600 },
+        tab: 'overview', view: 'runs', starting: false, toast: '',
+        harnessState: { evolving: false, source_run: null, harness_hash: null },
+        autoPromote: true, seenPromotions: {},
+        form: { evolve: true, rounds: 3, seed: 0, evaluation_repeats: 2, max_proposals: 8, max_payload_bytes: 600 },
+        dev: { instructions: '', success_criteria: '', use_repo: false, max_steps: 12, running: false, result: null, error: '' },
+        chat: { messages: [], input: '', sending: false, error: '', usage: {} },
+        promote: { busy: false, diff: '', message: '' },
 
         async init() {
           await this.loadPreflight();
@@ -884,8 +1619,18 @@ _HTML = r"""<!doctype html>
           try {
             const state = await this.api('/api/state');
             this.runs = state.runs || [];
-            this.jobs = (state.jobs || []).filter(j => j.status === 'running' || j.status === 'queued' || j.status === 'failed');
             this.serverProposer = state.proposer_mode || 'heuristic';
+            this.harnessState = state.harness_state || { evolving: false };
+            this.autoPromote = state.auto_promote_to_source !== false;
+            for (const j of (state.jobs || [])) {
+              if (j.status === 'completed' && j.source_promotion && !this.seenPromotions[j.id]) {
+                this.seenPromotions[j.id] = true;
+                const p = j.source_promotion;
+                if (p.applied) this.flash('Reviewer-approved edit integrated into harness.py (gate passed).');
+                else if (p.ok === false) this.flash('Auto-integration: ' + (p.message || 'gate failed; source restored.'));
+              }
+            }
+            this.jobs = (state.jobs || []).filter(j => j.status === 'running' || j.status === 'queued' || j.status === 'failed');
             if (!this.selectedId && this.runs.length) this.select(this.runs[0].id);
             if (this.selectedId && this.detail) await this.loadDetail(this.selectedId, true);
           } catch (e) { this.flash('refresh failed: ' + e.message); }
@@ -910,12 +1655,55 @@ _HTML = r"""<!doctype html>
         async startRun() {
           this.starting = true;
           try {
-            const body = { rounds: this.form.rounds, seed: this.form.seed, evaluation_repeats: this.form.evaluation_repeats, max_proposals: this.form.max_proposals, max_payload_bytes: this.form.max_payload_bytes };
+            const body = { run_mode: 'agentic', evolve: this.form.evolve, rounds: this.form.rounds, seed: this.form.seed, evaluation_repeats: this.form.evaluation_repeats, max_proposals: this.form.max_proposals, max_payload_bytes: this.form.max_payload_bytes };
             const job = await this.api('/api/runs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-            this.flash('Run ' + job.run_id + ' started (' + this.serverProposer + ')');
+            this.flash('Run ' + job.run_id + ' started (agentic)');
             setTimeout(() => this.refresh(), 600);
           } catch (e) { this.flash('start failed: ' + e.message); }
           finally { this.starting = false; }
+        },
+        async resetHarness() {
+          try { const r = await this.api('/api/harness/reset', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); this.harnessState = r.harness_state || { evolving: false }; this.flash('Harness lineage reset to initial.'); }
+          catch (e) { this.flash('reset failed: ' + e.message); }
+        },
+        async runDevTask() {
+          this.dev.running = true; this.dev.error = ''; this.dev.result = null;
+          try {
+            const body = { instructions: this.dev.instructions, success_criteria: this.dev.success_criteria, use_repo: this.dev.use_repo, max_steps: this.dev.max_steps };
+            this.dev.result = await this.api('/api/dev-task', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          } catch (e) { this.dev.error = e.message; }
+          finally { this.dev.running = false; }
+        },
+        async sendChat() {
+          const text = (this.chat.input || '').trim();
+          if (!text || this.chat.sending) return;
+          this.chat.messages.push({ role: 'user', content: text });
+          this.chat.input = ''; this.chat.sending = true; this.chat.error = '';
+          try {
+            const data = await this.api('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: this.chat.messages }) });
+            this.chat.messages.push({ role: 'assistant', content: data.reply });
+            this.chat.usage = data.token_usage || {};
+          } catch (e) { this.chat.error = e.message; }
+          finally { this.chat.sending = false; }
+        },
+        async previewPromote() {
+          if (!this.selectedId) return;
+          this.promote.busy = true; this.promote.message = '';
+          try {
+            const r = await this.api('/api/runs/' + encodeURIComponent(this.selectedId) + '/promote-to-source', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apply: false }) });
+            this.promote.diff = r.diff || ''; this.promote.message = r.changed ? (r.message || 'preview ready') : 'no change vs source';
+          } catch (e) { this.promote.message = 'preview failed: ' + e.message; }
+          finally { this.promote.busy = false; }
+        },
+        async applyPromote() {
+          if (!this.selectedId) return;
+          this.promote.busy = true; this.promote.message = '';
+          try {
+            const r = await this.api('/api/runs/' + encodeURIComponent(this.selectedId) + '/promote-to-source', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ apply: true }) });
+            this.promote.message = r.message || (r.ok ? 'applied' : 'failed');
+            this.flash(r.ok ? 'Promoted to source; gate passed.' : 'Promote failed; source restored.');
+          } catch (e) { this.promote.message = 'apply failed: ' + e.message; }
+          finally { this.promote.busy = false; }
         },
         toggleTheme() { this.theme = this.theme === 'dark' ? 'light' : 'dark'; localStorage.setItem('sh-theme', this.theme); },
         flash(msg) { this.toast = msg; setTimeout(() => { if (this.toast === msg) this.toast = ''; }, 4000); },
@@ -926,8 +1714,17 @@ _HTML = r"""<!doctype html>
         deltaTxt(d) { return d > 0 ? '+' + d : '' + d; },
         runScore(r) {
           const s = r.summary || {};
+          if (r.status === 'running' || r.status === 'queued') return r.status + '…';
           if (s.final_held_in_score == null) return r.error ? 'audit error' : 'pending';
           return 'in ' + this.pct(s.final_held_in_score) + ' · out ' + this.pct(s.final_held_out_score);
+        },
+        runBadge(r) {
+          if (r.status === 'running' || r.status === 'queued') return r.status;
+          return r.error ? 'error' : 'audit';
+        },
+        runBadgeClass(r) {
+          if (r.status === 'running' || r.status === 'queued') return 'superseded';
+          return r.error ? 'rejected' : 'accepted';
         },
         barPct(row) { const t = (row.after_held_in_passed||0) + (row.after_held_out_passed||0); return Math.min(100, t * 8); },
         acceptedIn(row) { return (row.after_held_in_passed > row.baseline_held_in_passed) || (row.after_held_out_passed > row.baseline_held_out_passed); },

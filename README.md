@@ -1,6 +1,6 @@
 # Self Harness
 
-This is a small, paper-faithful toy implementation of the Self-Harness protocol
+This is a small, paper-faithful implementation of the Self-Harness protocol
 from "Self-Harness: Harnesses That Improve Themselves" (arXiv:2606.09498).
 
 The project implements the core loop without requiring API keys:
@@ -16,9 +16,9 @@ The project implements the core loop without requiring API keys:
 
 The harness model declares paper-aligned surfaces for system/bootstrap/execution/
 verification/failure-recovery instructions, runtime policy, tools, skills,
-memory sources, and subagents. The toy runner only exercises the instruction and
-runtime-policy surfaces; the remaining surfaces are present so production
-adapters can target the same harness shape.
+memory sources, and subagents. The deterministic runner only exercises the
+instruction and runtime-policy surfaces; the remaining surfaces are present so
+production adapters can target the same harness shape.
 
 ## Quick Start
 
@@ -619,17 +619,34 @@ self-harness glm-agentic-demo examples/agentic_corpus.json \
 ## Operator Console
 
 `self-harness ui` serves a single-page operator console (stdlib HTTP server,
-CDN-loaded Alpine.js, no build step) for launching and inspecting runs:
+locally-vendored Alpine.js — works offline, no build step) for launching and
+inspecting runs, using GLM 5.2 as a real development agent, and evolving the
+harness:
 
 ```bash
 self-harness ui --proposer glm --host 127.0.0.1 --port 8765 --root . --runs-dir runs
 ```
 
-It exposes a run launcher with every engine knob, per-round trajectory with
-accept/merge badges, a round drill-down over the mined evidence bundle and
-proposals, an initial-vs-final harness diff, GLM token usage, and a live GLM
-reachability banner. It never claims benchmark reproduction. Full details and
-the JSON API are in `docs/operations/web_interface.md`.
+Three top-level views:
+
+- **Runs** — launch a real **agentic** run where GLM 5.2 solves a task corpus with
+  `bash`/file tools and the Codex CLI judges each result (so promoted edits change
+  genuine pass rates).
+  Promoted harness edits **persist and auto-load** as the next run's starting point
+  (the harness evolves across sessions); a gated **Promote → source** action writes
+  an evolved harness back into `initial_harness()` with a diff preview, backup, and
+  ruff/mypy/round-trip gate that auto-restores on failure.
+- **Dev task** — hand GLM 5.2 a described task (instructions + Codex success
+  criteria, optional workspace files, or "use this repo as the workspace") and watch
+  it solve with real tools, Codex-judged.
+- **Chat** — talk to and direct GLM 5.2 directly.
+
+It also shows per-round trajectory with accept/merge badges, a round drill-down over
+the mined evidence bundle and proposals, an initial-vs-final harness diff, GLM token
+usage, and a live GLM reachability banner. Agentic and dev-task runs execute
+model-generated commands on the host (no container); run only trusted inputs. It
+never claims benchmark reproduction. Full details and the JSON API are in
+`docs/operations/web_interface.md`.
 
 
 The proposer prompt renders held-in failure evidence only: pattern id, cluster
