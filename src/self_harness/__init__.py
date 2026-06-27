@@ -123,7 +123,7 @@ from self_harness.exceptions import (
     LLMClientError,
     LLMRequestError,
 )
-from self_harness.harness import initial_harness
+from self_harness.harness import figure_3_harness, initial_harness
 from self_harness.image_policy import (
     ImagePolicy,
     ImagePolicyDecision,
@@ -342,6 +342,7 @@ __all__ = [
     "inspect_harness_run",
     "init_promotion_manifest",
     "initial_harness",
+    "figure_3_harness",
     "load_audit_run",
     "load_attestation_trust_root",
     "load_corpus",

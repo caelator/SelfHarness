@@ -25,10 +25,15 @@ SURFACE_KINDS = {
 }
 
 
-# >>> SELF_HARNESS_INITIAL_HARNESS_START (machine-managed; promote-to-source rewrites this block)
-def initial_harness() -> HarnessSpec:
-    # Verbatim from the paper's Figure 3 (arXiv:2606.09498, page 8): the minimal
-    # DeepAgent-based initial harness used as the starting point for Self-Harness.
+def figure_3_harness() -> HarnessSpec:
+    """The frozen paper baseline — verbatim from Figure 3 (arXiv:2606.09498, page 8).
+
+    This is the immutable reference point for paper-fidelity checks. It is deliberately OUTSIDE the
+    machine-managed marker block below: ``promote-to-source`` only ever rewrites ``initial_harness()``,
+    so an evolved/promoted harness never changes what the fidelity fixtures hash against. Tests that
+    assert paper fidelity should build their audits from this, not from ``initial_harness()``.
+    """
+
     return HarnessSpec(
         system_prompt=(
             "You are running inside a Terminal Bench 2 Harbor task environment.\n\n"
@@ -55,6 +60,13 @@ def initial_harness() -> HarnessSpec:
         memory_sources=["/AGENTS.md"],
         subagents=[],
     )
+
+
+# >>> SELF_HARNESS_INITIAL_HARNESS_START (machine-managed; promote-to-source rewrites this block)
+def initial_harness() -> HarnessSpec:
+    # The live starting harness. Initially identical to figure_3_harness() (the frozen paper baseline);
+    # promote-to-source rewrites THIS block in place when an evolved harness is integrated into source.
+    return figure_3_harness()
 # <<< SELF_HARNESS_INITIAL_HARNESS_END
 
 

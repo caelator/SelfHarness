@@ -5,6 +5,7 @@ from self_harness.audit import load_audit_run, summarize_audit_run, write_audit_
 from self_harness.config import EngineConfig
 from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine, proposer_request_sha256
+from self_harness.harness import figure_3_harness
 from self_harness.llm_proposer import LLMProposer
 from self_harness.readiness import audit_tree_hash
 from self_harness.testing import MockLLMClient
@@ -115,6 +116,7 @@ def _run_mock_llm_canonical(out_dir: Path) -> None:
         proposer=LLMProposer(MockLLMClient(seed=0)),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, seed=0, schema_version="1.4", model_id="mock-llm-proposer"),
+        initial_spec=figure_3_harness(),
     )
     engine.run()
     write_audit_trajectory(out_dir)

@@ -21,7 +21,7 @@ from self_harness.demo import DeterministicRunner, demo_tasks
 from self_harness.engine import SelfHarnessEngine, validate_benchmark_claims, validate_proposer_context
 from self_harness.evaluation import acceptance_rule, evaluate
 from self_harness.exceptions import InvalidPatchError, PaperFidelityError
-from self_harness.harness import apply_patch, harness_hash, initial_harness
+from self_harness.harness import apply_patch, figure_3_harness, harness_hash, initial_harness
 from self_harness.llm_proposer import LLMProposer, render_llm_proposer_prompts
 from self_harness.mining import cluster_failures
 from self_harness.proposer import HeuristicProposer
@@ -523,6 +523,7 @@ def _run_canonical_demo(out_dir: Path) -> None:
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, seed=0),
+        initial_spec=figure_3_harness(),
     )
     engine.run()
     write_audit_trajectory(out_dir)
@@ -556,6 +557,7 @@ def _run_in_process_python_demo(out_dir: Path) -> None:
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, evaluation_repeats=2, model_id="in-process-python-verifier"),
+        initial_spec=figure_3_harness(),
     )
     engine.run()
 
@@ -588,6 +590,7 @@ def _run_http_verifier_demo(out_dir: Path, url: str) -> None:
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, evaluation_repeats=2, model_id="http-verifier"),
+        initial_spec=figure_3_harness(),
     )
     engine.run()
 
@@ -623,6 +626,7 @@ def _run_container_verifier_demo(out_dir: Path) -> None:
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=EngineConfig(rounds=1, evaluation_repeats=2, model_id="container-verifier-dry-run"),
+        initial_spec=figure_3_harness(),
     )
     engine.run()
 
@@ -684,6 +688,7 @@ def _run_terminal_bench_dry_run(out_dir: Path) -> None:
                 "reproduction_claimed": False,
             },
         ),
+        initial_spec=figure_3_harness(),
     )
     engine.run()
 
