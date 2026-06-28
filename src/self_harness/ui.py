@@ -920,6 +920,10 @@ class HarnessUiApp:
             out_dir=out_dir,
             config=engine_config,
             initial_spec=initial_spec,
+            # Agentic GLM solving is stochastic; majority-vote + early-stop denoises the signal and lets
+            # the acceptance gate see real task-level improvements (the reproduction/deterministic paths
+            # keep the paper-faithful "sum" aggregation).
+            aggregation="majority",
         )
 
     def _default_agentic_corpus(self) -> Path:

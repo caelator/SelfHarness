@@ -115,6 +115,7 @@ class SelfHarnessEngine:
         initial_spec: HarnessSpec | None = None,
         evaluation_repeats: int = 2,
         config: EngineConfig | None = None,
+        aggregation: str = "sum",
     ) -> None:
         if config is None:
             config = EngineConfig(
@@ -131,6 +132,9 @@ class SelfHarnessEngine:
         self.seed = config.seed
         self.proposal_budget = config.proposal_budget
         self.evaluation_repeats = config.evaluation_repeats
+        # How repeats combine into scores: "sum" (paper-faithful, default) or "majority" (loop denoising
+        # + early-stop). Kept off EngineConfig so the canonical config hash / fixtures are unchanged.
+        self.aggregation = aggregation
         self.harness = initial_spec or initial_harness()
         self.lineage: list[LineageRecord] = []
         self.attempted_edits: list[AttemptedEdit] = []
@@ -160,6 +164,7 @@ class SelfHarnessEngine:
                 self.harness,
                 self.tasks,
                 repeats=self.evaluation_repeats,
+                aggregation=self.aggregation,
             )
             patterns = cluster_failures(
                 baseline.records,
@@ -232,6 +237,7 @@ class SelfHarnessEngine:
                         candidate_spec,
                         self.tasks,
                         repeats=self.evaluation_repeats,
+                        aggregation=self.aggregation,
                     )
                 except Exception as exc:
                     proposal_rows.append(
@@ -266,6 +272,7 @@ class SelfHarnessEngine:
                     merged_spec,
                     self.tasks,
                     repeats=self.evaluation_repeats,
+                    aggregation=self.aggregation,
                 )
                 merge_decision = acceptance_rule(baseline, merged_eval)
                 evaluation_rows.extend(
