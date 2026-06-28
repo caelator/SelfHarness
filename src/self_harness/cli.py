@@ -152,9 +152,139 @@ from self_harness.signing import (
 from self_harness.types import ProposalBudget, stable_json_dumps, to_jsonable
 
 
+def run_code_default() -> int:
+    """Launch the coding agent with sensible defaults (used by the home menu / bare flow).
+
+    Uses the current directory, the central shared harness, and saved settings. This is what the menu's
+    [1] Code action calls so the user never has to assemble flags.
+    """
+
+    from self_harness import user_config
+
+    cfg = user_config.load_config()
+    central = cfg.get("share_central_harness", True)
+    harness_state: Path | None = None
+    inbox_dir: Path | None = None
+    if central:
+        central_runs = Path.home() / "Documents" / "SelfHarness" / "runs"
+        if (central_runs / "harness_state.json").is_file():
+            harness_state = central_runs / "harness_state.json"
+            inbox_dir = central_runs / "inbox"
+    return _run_code(
+        root=Path.cwd(),
+        harness_state=harness_state,
+        inbox_dir=inbox_dir,
+        max_steps=int(cfg.get("max_steps", 24) or 24),
+        tool_timeout_seconds=int(cfg.get("tool_timeout_seconds", 30) or 30),
+        harvest=bool(cfg.get("harvest", True)),
+        resume=None,
+        plain=False,
+    )
+
+
+def run_console_default() -> int:
+    """Start the web console with defaults (home menu [3] Console)."""
+
+    from self_harness.ui import serve_ui
+
+    return serve_ui(
+        host="127.0.0.1",
+        port=8765,
+        root=Path("."),
+        runs_dir=Path("runs"),
+        proposer_mode="glm",
+        harness_state=None,
+        max_steps=12,
+        tool_timeout_seconds=30,
+        codex_binary="codex",
+        auto_promote_to_source=True,
+        task_generation=True,
+        generation_guard=False,
+    )
+
+
+def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
+    """Run the continuous self-improvement loop in the foreground until Ctrl-C (home menu [2] Loop).
+
+    Reuses the web app's autoloop controller (HarnessUiApp.start_autoloop) without serving HTTP, then
+    blocks, printing periodic status, until the user interrupts.
+    """
+
+    import time
+
+    from self_harness.agentic_session import HOST_EXEC_WARNING_LINES
+    from self_harness.ui import HarnessUiApp
+
+    root = Path.home() / "Documents" / "SelfHarness"
+    if not (root / "examples" / "agentic_corpus.json").is_file():
+        root = Path.cwd()
+
+    for line in HOST_EXEC_WARNING_LINES:
+        print(line)
+    print()
+
+    app = HarnessUiApp(
+        root=root,
+        runs_dir=Path("runs"),
+        proposer_mode="glm",
+        auto_promote_to_source=True,
+    )
+    result = app.start_autoloop({"rounds": rounds, "seed": seed, "evaluation_repeats": 1})
+    if not result.get("ok"):
+        print(f"could not start loop: {result.get('message')}")
+        return 1
+    print("Continuous self-improvement loop started. Press Ctrl-C to stop.\n")
+    try:
+        while True:
+            time.sleep(10)
+            state = app.state().get("autoloop", {})
+            done = state.get("runs_completed", 0)
+            edits = state.get("edits_promoted", 0)
+            last = state.get("last_outcome") or "running…"
+            print(f"  loop: {done} run(s) completed, {edits} edit(s) promoted — {last}")
+            if not state.get("active") and state.get("error"):
+                print(f"  loop error: {state['error']}")
+                return 1
+    except KeyboardInterrupt:
+        print("\nstopping loop after the current run…")
+        app.stop_autoloop()
+        # Give the controller a moment to observe the stop flag.
+        for _ in range(6):
+            if not app.state().get("autoloop", {}).get("active"):
+                break
+            time.sleep(0.5)
+        print("loop stopped.")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="self-harness")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(
+        prog="self-harness",
+        description="SelfHarness — a GLM 5.2 coding agent that improves its own harness. "
+        "Run with no command for an interactive menu, or `self-harness help` for a guide.",
+    )
+    # Subcommand is OPTIONAL: bare `self-harness` opens the interactive home menu.
+    subparsers = parser.add_subparsers(dest="command", required=False)
+
+    subparsers.add_parser("menu", help="open the interactive home menu (default when no command given)")
+
+    help_parser = subparsers.add_parser("help", help="descriptive, plain-language guide to everything")
+    help_parser.add_argument("topic", nargs="?", default=None, help="overview, code, loop, settings, key, ...")
+
+    settings_parser = subparsers.add_parser(
+        "settings", help="view or change configuration, including the GLM 5.2 API key"
+    )
+    settings_parser.add_argument(
+        "settings_args",
+        nargs=argparse.REMAINDER,
+        help="show | get <key> | set <key> <value> | unset <key> | path (no args = interactive editor)",
+    )
+
+    loop_parser = subparsers.add_parser(
+        "loop", help="start the continuous self-improvement loop (Ctrl-C to stop)"
+    )
+    loop_parser.add_argument("--rounds", type=int, default=1, help="evolution rounds per iteration")
+    loop_parser.add_argument("--seed", type=int, default=0)
 
     demo_parser = subparsers.add_parser("demo", help="run the deterministic Self-Harness demo")
     demo_parser.add_argument("--rounds", type=int, default=3)
@@ -926,6 +1056,22 @@ def main(argv: list[str] | None = None) -> int:
     capture_parser.add_argument("--skip-docker-preflight", action="store_true")
 
     args = parser.parse_args(argv)
+
+    # Bare `self-harness` (or `menu`) → interactive home menu.
+    if args.command is None or args.command == "menu":
+        from self_harness import cli_home
+
+        return cli_home.run_home()
+    if args.command == "help":
+        from self_harness import cli_home
+
+        return cli_home.print_help(args.topic)
+    if args.command == "settings":
+        from self_harness import cli_home
+
+        return cli_home.run_settings(list(args.settings_args or []))
+    if args.command == "loop":
+        return run_loop_default(rounds=args.rounds, seed=args.seed)
     if args.command == "demo":
         return _run_demo(
             rounds=args.rounds,

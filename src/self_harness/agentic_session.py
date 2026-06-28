@@ -33,18 +33,41 @@ HOST_EXEC_WARNING = " ".join(HOST_EXEC_WARNING_LINES)
 
 
 def resolve_zai_api_key(env: Mapping[str, str] | None = None) -> str:
-    """Return the Z.ai API key or raise ``AgenticRunnerError`` if it is unset."""
+    """Return the Z.ai API key or raise ``AgenticRunnerError`` if it is unset.
+
+    Resolution: an explicitly supplied ``env`` mapping (if given) → process environment → the saved
+    user config file (``self-harness settings``). The config-file fallback is what lets the CLI run
+    without sourcing an env file each session.
+    """
 
     source = env if env is not None else os.environ
     api_key = source.get("ZAI_API_KEY")
-    if not api_key:
-        raise AgenticRunnerError("missing ZAI_API_KEY for GLM agentic session")
-    return api_key
+    if api_key:
+        return api_key
+    if env is None:
+        # Only consult the saved config when reading the real process environment (not a caller-supplied
+        # mapping, which tests use to assert the env-only contract).
+        from self_harness.user_config import load_config
+
+        saved = load_config().api_key
+        if saved:
+            return saved
+    raise AgenticRunnerError(
+        "missing ZAI_API_KEY for GLM agentic session — set it with `self-harness settings` "
+        "(or export ZAI_API_KEY)"
+    )
 
 
 def resolve_zai_base_url(env: Mapping[str, str] | None = None) -> str:
     source = env if env is not None else os.environ
-    return source.get("ZAI_BASE_URL", DEFAULT_ZAI_BASE_URL)
+    url = source.get("ZAI_BASE_URL")
+    if url:
+        return url
+    if env is None:
+        from self_harness.user_config import load_config
+
+        return load_config().base_url
+    return DEFAULT_ZAI_BASE_URL
 
 
 def build_agentic_config(
