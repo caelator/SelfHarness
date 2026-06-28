@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 from self_harness import user_config
 from self_harness.console_style import console
@@ -132,6 +133,9 @@ Safety — what to know
 All commands
   Everyday:
     self-harness                 open the home menu (this)
+    self-harness save            save current workspace as a project
+    self-harness resume <#>      resume a saved project
+    self-harness projects        list saved projects
     self-harness code            interactive coding agent (current folder)
     self-harness loop            start the continuous self-improvement loop
     self-harness ui              the web console
@@ -321,9 +325,10 @@ def _settings_interactive(cfg: user_config.UserConfig) -> int:
 _MENU_ITEMS = (
     ("1", "Code", "interactive coding agent (current folder)"),
     ("2", "Loop", "start/stop continuous self-improvement"),
-    ("3", "Console", "open the web dashboard"),
-    ("4", "Settings", "API key, model, defaults"),
-    ("5", "Help", "what everything does"),
+    ("3", "Projects", "save / resume work snapshots"),
+    ("4", "Console", "open the web dashboard"),
+    ("5", "Settings", "API key, model, defaults"),
+    ("6", "Help", "what everything does"),
     ("q", "Quit", ""),
 )
 
@@ -365,14 +370,225 @@ def run_home() -> int:
             _menu_code()
         elif choice in {"2", "loop", "l"}:
             _menu_loop()
-        elif choice in {"3", "console", "ui"}:
+        elif choice in {"3", "projects", "p"}:
+            _menu_projects()
+        elif choice in {"4", "console", "ui"}:
             _menu_console()
-        elif choice in {"4", "settings", "s"}:
+        elif choice in {"5", "settings", "s"}:
             run_settings([])
-        elif choice in {"5", "help", "h", "?"}:
+        elif choice in {"6", "help", "h", "?"}:
             _menu_help()
         else:
-            console.status(f"'{choice}' is not an option. Pick 1-5 or q.", "warn")
+            console.status(f"'{choice}' is not an option. Pick 1-6 or q.", "warn")
+
+
+def _menu_projects() -> None:
+    """Save/resume project snapshots with a polished interactive UI."""
+    from self_harness import project_manager
+
+    while True:
+        console.blank()
+        console.rule("Projects")
+        console.blank()
+
+        projects = project_manager.list_projects()
+
+        # ── Save current ──
+        console.line("[s] Save current workspace", "accent")
+
+        if projects:
+            console.blank()
+            console.line("Saved projects:", "heading")
+            console.blank()
+            rows: list[tuple[str, str, str, str, str]] = []
+            for i, p in enumerate(projects, 1):
+                # Status indicator
+                if p.held_in_score is not None:
+                    score_str = f"{p.held_in_score:.0%}"
+                else:
+                    score_str = "—"
+                # Truncate name for display
+                name_display = p.name[:30] if len(p.name) > 30 else p.name
+                # Working dir basename
+                dir_display = Path(p.working_dir).name if p.working_dir else "?"
+                rows.append((
+                    f"  [{i}]",
+                    name_display,
+                    dir_display,
+                    score_str,
+                    p.saved_at,
+                ))
+            console.table(rows, headers=["", "Name", "Dir", "Score", "Saved"])
+            console.blank()
+            console.line("  Enter a number to resume, or 'd <#>' to delete", "system")
+        else:
+            console.blank()
+            console.line("  No saved projects yet.", "system")
+
+        console.blank()
+        console.line("  [enter] back to menu", "system")
+
+        try:
+            choice = console.prompt("projects › ", "user").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.blank()
+            return
+
+        if choice == "":
+            return
+
+        if choice in {"s", "save"}:
+            _menu_save_project()
+            continue
+
+        # Delete: "d 3" or "delete 3"
+        if choice.startswith("d ") or choice.startswith("delete "):
+            num_str = choice.split()[-1]
+            project = project_manager.load_project(num_str)
+            if project:
+                project_manager.delete_project(project.id)
+                console.status(f"Deleted '{project.name}'", "success")
+            else:
+                console.status(f"No project at #{num_str}", "warn")
+            continue
+
+        # Resume by number or name
+        project = project_manager.load_project(choice)
+        if project is None:
+            console.status(f"No project matching '{choice}'", "warn")
+            continue
+
+        _menu_resume_project(project)
+
+
+def _menu_save_project() -> None:
+    """Save the current workspace as a project snapshot."""
+    from self_harness import project_manager
+    from self_harness.loop_paths import central_runs_dir
+
+    console.blank()
+    console.line("Save current workspace", "heading")
+    console.blank()
+
+    # Name
+    default_name = Path.cwd().name
+    try:
+        name = console.prompt(f"project name ({default_name}) › ", "user").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if not name:
+        name = default_name
+
+    # Notes
+    try:
+        notes = console.prompt("notes (what were you working on?) › ", "user").strip()
+    except (EOFError, KeyboardInterrupt):
+        notes = ""
+
+    # Load harness state if available
+    harness_state: dict | None = None
+    runs_dir = central_runs_dir()
+    if runs_dir and runs_dir is not None:
+        state_file = runs_dir / "harness_state.json"
+        if state_file.is_file():
+            try:
+                import json
+                harness_state = json.loads(state_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    # Find corpus
+    corpus_path: str | None = None
+    for candidate in [Path.cwd() / "examples" / "agentic_corpus.json",
+                      Path.cwd() / "examples" / "local_corpus.json"]:
+        if candidate.is_file():
+            corpus_path = str(candidate)
+            break
+
+    # Count rounds from runs dir
+    rounds = 0
+    if runs_dir:
+        rounds_dir = runs_dir / "rounds"
+        if rounds_dir.is_dir():
+            rounds = len(list(rounds_dir.iterdir()))
+
+    # Extract scores from harness state if available
+    held_in: float | None = None
+    held_out: float | None = None
+
+    project = project_manager.save_project(
+        name=name,
+        working_dir=str(Path.cwd()),
+        corpus_path=corpus_path,
+        harness_state=harness_state,
+        rounds_completed=rounds,
+        notes=notes,
+        held_in_score=held_in,
+        held_out_score=held_out,
+    )
+    console.blank()
+    console.status(f"Saved '{name}' — resume it later with: self-harness resume {project.id.split('-')[-1]}", "success")
+    console.line(f"  directory: {Path.cwd()}", "system")
+    if harness_state:
+        console.line(f"  harness:  captured ({rounds} rounds)", "system")
+    console.blank()
+
+
+def _menu_resume_project(project: Any) -> None:
+    """Show project details and offer to resume."""
+    console.blank()
+    console.rule(f"Resume: {project.name}")
+
+    console.blank()
+    console.line(f"  directory:   {project.working_dir}", "system")
+    console.line(f"  saved:       {project.saved_at}", "system")
+    if project.corpus_path:
+        console.line(f"  corpus:      {project.corpus_path}", "system")
+    console.line(f"  rounds done: {project.rounds_completed}", "system")
+    if project.notes:
+        console.blank()
+        console.panel(project.notes, title="Notes", role="accent")
+    console.blank()
+
+    # Check if the directory exists
+    target_dir = Path(project.working_dir)
+    if not target_dir.is_dir():
+        console.error(f"Directory does not exist: {target_dir}")
+        console.line("  The project was saved from a location that is no longer available.", "warn")
+        console.blank()
+        console.line("  [enter] back", "system")
+        try:
+            console.prompt("› ", "user")
+        except (EOFError, KeyboardInterrupt):
+            pass
+        return
+
+    console.line(f"  [r] resume — cd to {target_dir.name} and continue", "accent")
+    console.line("  [c] code  — open the coding agent there", "accent")
+    console.line("  [l] loop  — start the self-improvement loop there", "accent")
+    console.line("  [enter] back", "system")
+
+    try:
+        choice = console.prompt("resume › ", "user").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if choice in {"r", "resume", "c", "code", "l", "loop"}:
+        # Change to the project directory
+        import os
+        os.chdir(target_dir)
+        console.status(f"Switched to: {target_dir}", "success")
+
+        if choice in {"c", "code"}:
+            _menu_code()
+        elif choice in {"l", "loop"}:
+            _menu_loop()
+        else:
+            console.blank()
+            console.line(f"You're now in: {target_dir}", "heading")
+            console.line("  The coding agent, loop, and console will use this directory.", "system")
+            console.line("  Type 'self-harness code' to start coding, or pick from the menu.", "system")
+            console.blank()
 
 
 def _menu_code() -> None:

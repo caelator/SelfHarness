@@ -134,6 +134,7 @@ from self_harness.operator_promotion import (
     sign_promotion_manifest,
     verify_promotion_manifest,
 )
+from self_harness.project_manager import list_projects, load_project, save_project
 from self_harness.proposer import HeuristicProposer
 from self_harness.reporting import write_benchmark_report
 from self_harness.reproduction_readiness import (
@@ -343,6 +344,28 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run detached so it survives closing the terminal (manage with `loop status` / `loop stop`)",
     )
+
+    save_parser = subparsers.add_parser(
+        "save",
+        help="save the current workspace as a resumable project",
+    )
+    save_parser.add_argument("--name", default=None, help="project name (default: directory name)")
+    save_parser.add_argument("--notes", default="", help="what you were working on")
+    save_parser.add_argument("--json", action="store_true", help="output JSON instead of text")
+
+    resume_parser = subparsers.add_parser(
+        "resume",
+        help="resume a saved project",
+    )
+    resume_parser.add_argument("project", nargs="?", default=None, help="project number, ID, or name")
+    resume_parser.add_argument("--json", action="store_true", help="output project details as JSON")
+    resume_parser.add_argument("--list", action="store_true", help="list saved projects")
+
+    projects_parser = subparsers.add_parser(
+        "projects",
+        help="list saved projects",
+    )
+    projects_parser.add_argument("--json", action="store_true", help="output JSON")
 
     demo_parser = subparsers.add_parser("demo", help="run the deterministic Self-Harness demo")
     demo_parser.add_argument("--rounds", type=int, default=3)
@@ -1157,6 +1180,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.background:
             return loop_daemon.start_background(rounds=args.rounds, seed=args.seed, eval_repeats=args.eval_repeats)
         return run_loop_default(rounds=args.rounds, seed=args.seed, eval_repeats=args.eval_repeats)
+    if args.command == "save":
+        return _run_save(args)
+    if args.command == "resume":
+        return _run_resume(args)
+    if args.command == "projects":
+        return _run_projects(args)
     if args.command == "demo":
         return _run_demo(
             rounds=args.rounds,
@@ -1501,6 +1530,108 @@ def _require_passphrase(value: str, label: str) -> str:
     if not value:
         raise CorpusSigningError(f"{label} must be non-empty")
     return value
+
+
+def _run_save(args: argparse.Namespace) -> int:
+    """Save the current workspace as a project snapshot."""
+    name = args.name or Path.cwd().name
+    from self_harness.loop_paths import central_runs_dir
+
+    harness_state: dict[str, Any] | None = None
+    runs_dir = central_runs_dir()
+    if runs_dir:
+        state_file = runs_dir / "harness_state.json"
+        if state_file.is_file():
+            try:
+                harness_state = json.loads(state_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    corpus_path: str | None = None
+    for candidate in [Path.cwd() / "examples" / "agentic_corpus.json",
+                      Path.cwd() / "examples" / "local_corpus.json"]:
+        if candidate.is_file():
+            corpus_path = str(candidate)
+            break
+
+    project = save_project(
+        name=name,
+        working_dir=str(Path.cwd()),
+        corpus_path=corpus_path,
+        harness_state=harness_state,
+        notes=args.notes,
+    )
+    if args.json:
+        print(json.dumps({
+            "id": project.id,
+            "name": project.name,
+            "working_dir": project.working_dir,
+            "saved_at": project.saved_at,
+        }))
+    else:
+        print(f"Saved '{name}'")
+        print(f"  directory: {project.working_dir}")
+        print(f"  resume:    self-harness resume {project.id.split('-')[-1]}")
+    return 0
+
+
+def _run_resume(args: argparse.Namespace) -> int:
+    """Resume a saved project."""
+    if args.list or args.project is None:
+        return _run_projects(args)
+
+    project = load_project(args.project)
+    if project is None:
+        print(f"No project matching '{args.project}'", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps({
+            "id": project.id,
+            "name": project.name,
+            "working_dir": project.working_dir,
+            "corpus_path": project.corpus_path,
+            "rounds_completed": project.rounds_completed,
+            "notes": project.notes,
+            "saved_at": project.saved_at,
+        }))
+    else:
+        print(f"Project: {project.name}")
+        print(f"  directory: {project.working_dir}")
+        print(f"  saved:    {project.saved_at}")
+        if project.notes:
+            print(f"  notes:    {project.notes}")
+        print()
+        print("To resume:")
+        print(f"  cd {project.working_dir}")
+        print("  self-harness")
+    return 0
+
+
+def _run_projects(args: argparse.Namespace) -> int:
+    """List saved projects."""
+    projects = list_projects()
+    if args.json:
+        print(json.dumps([
+            {"id": p.id, "name": p.name, "working_dir": p.working_dir,
+             "saved_at": p.saved_at, "rounds_completed": p.rounds_completed,
+             "notes": p.notes}
+            for p in projects
+        ]))
+    elif not projects:
+        print("No saved projects. Run 'self-harness save' to create one.")
+    else:
+        print(f"{'#':>3}  {'Name':<30} {'Directory':<20} {'Saved':<18} Notes")
+        print("-" * 90)
+        for i, p in enumerate(projects, 1):
+            name = p.name[:30]
+            directory = Path(p.working_dir).name[:20] if p.working_dir else "?"
+            notes = (p.notes[:30] + "…") if len(p.notes) > 30 else p.notes
+            print(f"{i:>3}  {name:<30} {directory:<20} {p.saved_at:<18} {notes}")
+        print()
+        print("Resume:  self-harness resume <#>")
+        print("Delete:  self-harness projects --json | jq 'del(.[])'  # or use the menu")
+    return 0
 
 
 def _run_demo(
