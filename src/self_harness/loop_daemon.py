@@ -85,7 +85,7 @@ def is_running() -> int | None:
     return None
 
 
-def start_background(*, rounds: int = 1, seed: int = 0) -> int:
+def start_background(*, rounds: int = 1, seed: int = 0, eval_repeats: int | None = None) -> int:
     """Spawn the loop as a detached process. Returns a process exit code (0 on success)."""
 
     existing = is_running()
@@ -96,11 +96,14 @@ def start_background(*, rounds: int = 1, seed: int = 0) -> int:
         return 0
 
     log = logfile()
+    cmd = [sys.executable, "-m", "self_harness.cli", "loop", "--rounds", str(rounds), "--seed", str(seed)]
+    if eval_repeats is not None:
+        cmd += ["--eval-repeats", str(eval_repeats)]
     # Append so successive sessions keep history; the child prints a banner each start.
     log_handle = open(log, "a", encoding="utf-8")  # noqa: SIM115 - handed to the child; closed in parent below.
     try:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "self_harness.cli", "loop", "--rounds", str(rounds), "--seed", str(seed)],
+            cmd,
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,

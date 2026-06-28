@@ -155,6 +155,13 @@ from self_harness.types import ProposalBudget, stable_json_dumps, to_jsonable
 # far more than the old default of 24 tool-calling steps; 80 keeps big tasks moving while bounding cost.
 DEFAULT_CODE_MAX_STEPS = 80
 
+# Loop evaluation repeats. GLM solving is stochastic, so a single attempt per task (repeats=1) makes a
+# real fix indistinguishable from a coin flip — a genuine improvement registers as a "tie" and is dropped
+# (a recall failure). Repeating each task N times and counting passes across all N×task records both
+# averages out that noise AND gives the strict acceptance gate graded resolution (a task going 1/3→3/3 is
+# a real +2, not a tie), so it raises recall WITHOUT weakening precision. 3 is a good cost/signal balance.
+DEFAULT_LOOP_EVAL_REPEATS = 3
+
 
 def run_code_default() -> int:
     """Launch the coding agent with sensible defaults (used by the home menu / bare flow).
@@ -202,7 +209,21 @@ def run_console_default() -> int:
     )
 
 
-def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
+def _resolve_eval_repeats(explicit: int | None, cfg: Any) -> int:
+    """Resolve loop eval repeats: explicit flag → saved setting → default. Clamped to >= 1."""
+
+    if explicit is not None:
+        return max(1, explicit)
+    saved = cfg.get("loop_eval_repeats")
+    if saved is not None:
+        try:
+            return max(1, int(saved))
+        except (TypeError, ValueError):
+            pass
+    return DEFAULT_LOOP_EVAL_REPEATS
+
+
+def run_loop_default(*, rounds: int = 1, seed: int = 0, eval_repeats: int | None = None) -> int:
     """Run the continuous self-improvement loop in the foreground until Ctrl-C / SIGTERM.
 
     Reuses the web app's autoloop controller (HarnessUiApp.start_autoloop) without serving HTTP, then
@@ -213,11 +234,13 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
     import signal
     import time
 
+    from self_harness import user_config
     from self_harness.agentic_session import HOST_EXEC_WARNING_LINES
     from self_harness.console_style import console
     from self_harness.loop_paths import loop_root
     from self_harness.ui import HarnessUiApp
 
+    repeats = _resolve_eval_repeats(eval_repeats, user_config.load_config())
     root = loop_root()
 
     for line in HOST_EXEC_WARNING_LINES:
@@ -230,10 +253,11 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
         proposer_mode="glm",
         auto_promote_to_source=True,
     )
-    result = app.start_autoloop({"rounds": rounds, "seed": seed, "evaluation_repeats": 1})
+    result = app.start_autoloop({"rounds": rounds, "seed": seed, "evaluation_repeats": repeats})
     if not result.get("ok"):
         console.error(f"could not start loop: {result.get('message')}")
         return 1
+    console.line(f"  eval repeats per task: {repeats}", "system")
 
     # Translate SIGTERM into KeyboardInterrupt so the graceful-stop path below handles both.
     def _on_term(_signum: int, _frame: object) -> None:
@@ -305,6 +329,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     loop_parser.add_argument("--rounds", type=int, default=1, help="evolution rounds per iteration")
     loop_parser.add_argument("--seed", type=int, default=0)
+    loop_parser.add_argument(
+        "--eval-repeats",
+        type=int,
+        default=None,
+        help=f"times each task is attempted per evaluation (default: settings or {DEFAULT_LOOP_EVAL_REPEATS}); "
+        "more repeats reduce noise and let the gate see graded improvements",
+    )
     loop_parser.add_argument(
         "--background",
         "-b",
@@ -1113,8 +1144,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.loop_action == "stop":
             return loop_daemon.stop_background()
         if args.background:
-            return loop_daemon.start_background(rounds=args.rounds, seed=args.seed)
-        return run_loop_default(rounds=args.rounds, seed=args.seed)
+            return loop_daemon.start_background(rounds=args.rounds, seed=args.seed, eval_repeats=args.eval_repeats)
+        return run_loop_default(rounds=args.rounds, seed=args.seed, eval_repeats=args.eval_repeats)
     if args.command == "demo":
         return _run_demo(
             rounds=args.rounds,

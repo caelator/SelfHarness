@@ -33,8 +33,9 @@ _KNOWN_KEYS = (
     "auto_promote",
     "harvest",
     "share_central_harness",
+    "loop_eval_repeats",
 )
-_INT_KEYS = frozenset({"max_steps", "tool_timeout_seconds"})
+_INT_KEYS = frozenset({"max_steps", "tool_timeout_seconds", "loop_eval_repeats"})
 _BOOL_KEYS = frozenset({"auto_promote", "harvest", "share_central_harness"})
 
 

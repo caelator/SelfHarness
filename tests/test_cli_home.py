@@ -73,6 +73,23 @@ def test_resolve_defaults(cfg_home: Path) -> None:
     assert user_config.resolve_api_key() is None
 
 
+def test_loop_eval_repeats_resolution(cfg_home: Path) -> None:
+    from self_harness import cli
+
+    c = user_config.load_config()
+    # Default when nothing set.
+    assert cli._resolve_eval_repeats(None, c) == cli.DEFAULT_LOOP_EVAL_REPEATS
+    # Explicit flag wins and is clamped to >= 1.
+    assert cli._resolve_eval_repeats(5, c) == 5
+    assert cli._resolve_eval_repeats(0, c) == 1
+    # Saved setting is honored when no explicit flag.
+    c.set("loop_eval_repeats", "4")
+    assert c.get("loop_eval_repeats") == 4  # coerced to int
+    assert cli._resolve_eval_repeats(None, c) == 4
+    # Explicit still beats saved.
+    assert cli._resolve_eval_repeats(2, c) == 2
+
+
 def test_agentic_session_falls_back_to_config(cfg_home: Path) -> None:
     from self_harness.agentic_session import resolve_zai_api_key
     from self_harness.exceptions import AgenticRunnerError

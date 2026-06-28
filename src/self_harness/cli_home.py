@@ -99,7 +99,7 @@ Settings — configuration without environment variables
     self-harness settings path              print the config file location
   Stored in ~/.config/self-harness/config.json (owner-only, 0600).
   Keys: api_key, base_url, model, max_steps, tool_timeout_seconds, auto_promote, harvest,
-        share_central_harness.
+        share_central_harness, loop_eval_repeats.
 """,
     "key": """\
 API key — connecting to GLM 5.2
@@ -207,6 +207,7 @@ _SETTING_LABELS = {
     "auto_promote": "Loop: auto-integrate accepted edits into source",
     "harvest": "Coding agent: harvest failures for the loop",
     "share_central_harness": "Code: share one central harness across all projects",
+    "loop_eval_repeats": "Loop: times each task is attempted per evaluation (higher = less noise)",
 }
 
 
