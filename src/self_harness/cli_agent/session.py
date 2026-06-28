@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,11 @@ from typing import Any
 from self_harness.adapters.agentic.agent_loop import run_agent_loop
 from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
 from self_harness.adapters.agentic.tools import DEFAULT_TOOL_TIMEOUT_SECONDS
-from self_harness.adapters.llm.messages import AnthropicAgentTransport, MessagesTransport
+from self_harness.adapters.llm.messages import (
+    AnthropicAgentTransport,
+    MessagesTransport,
+    StreamingAnthropicAgentTransport,
+)
 from self_harness.adapters.terminal_bench.agent_render import render_system_prompt
 from self_harness.cli_agent.harvest import FailureHarvester
 from self_harness.exceptions import InvalidPatchError
@@ -80,6 +85,20 @@ class InteractiveSession:
             )
         return self._transport
 
+    def _streaming_transport(
+        self,
+        on_text_delta: Callable[[str], None] | None,
+        on_tool_start: Callable[[str], None] | None,
+    ) -> MessagesTransport:
+        # Streaming transports carry per-turn callbacks, so build a fresh one each turn rather than cache.
+        return StreamingAnthropicAgentTransport(
+            base_url=self.base_url,
+            api_key=self.api_key,
+            model=self.model,
+            on_text_delta=on_text_delta,
+            on_tool_start=on_tool_start,
+        )
+
     @property
     def harness_hash(self) -> str:
         return harness_hash(self.harness)
@@ -88,23 +107,48 @@ class InteractiveSession:
         self.history.clear()
         self.turn_index = 0
 
-    def send(self, user_text: str) -> TurnResult:
-        """Run one user turn through the agentic loop, persisting conversation state and harvesting."""
+    def send(
+        self,
+        user_text: str,
+        *,
+        on_text_delta: Callable[[str], None] | None = None,
+        on_tool_start: Callable[[str], None] | None = None,
+        on_tool_event: Callable[[str, str, bool], None] | None = None,
+    ) -> TurnResult:
+        """Run one user turn through the agentic loop, persisting conversation state and harvesting.
+
+        When ``on_text_delta`` is provided, a streaming transport is used so the reply arrives token by
+        token (interactive UI); otherwise the blocking transport is used (tests, piped/non-tty). The
+        ``on_tool_event(name, summary, ok)`` callback fires as each tool completes, in addition to the
+        always-recorded ``tool_activity`` list.
+        """
 
         self.turn_index += 1
         activity: list[str] = []
 
         def _observe(name: str, tool_input: Any, result: Any) -> None:
             self.harvester.observe(name, tool_input, result)
+            ok = not result.is_error
             if name == "bash":
                 cmd = str(tool_input.get("command", ""))[:80]
-                status = "ok" if not result.is_error else "error"
-                activity.append(f"bash: {cmd} ({status})")
+                summary = f"$ {cmd}"
+                activity.append(f"bash: {cmd} ({'ok' if ok else 'error'})")
             elif name in {"read_file", "write_file"}:
-                activity.append(f"{name}: {tool_input.get('path', '')}")
+                summary = str(tool_input.get("path", ""))
+                activity.append(f"{name}: {summary}")
+            else:
+                summary = name
+                activity.append(name)
+            if on_tool_event is not None:
+                on_tool_event(name, summary, ok)
+
+        if on_text_delta is not None:
+            transport: MessagesTransport = self._streaming_transport(on_text_delta, on_tool_start)
+        else:
+            transport = self._get_transport()
 
         loop = run_agent_loop(
-            transport=self._get_transport(),
+            transport=transport,
             system_prompt=render_system_prompt(self.harness),
             task_prompt=user_text,
             workdir=self.workdir,

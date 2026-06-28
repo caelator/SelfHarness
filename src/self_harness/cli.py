@@ -260,6 +260,19 @@ def main(argv: list[str] | None = None) -> int:
         help="do not harvest failing commands into the self-improvement inbox",
     )
     code_parser.set_defaults(harvest=True)
+    code_parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="__latest__",
+        default=None,
+        metavar="SESSION_ID",
+        help="resume a saved session (most recent if no id given) so prior context continues",
+    )
+    code_parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="disable the rich TUI (plain text output; auto-enabled when stdout is not a terminal)",
+    )
 
     model_preflight_parser = subparsers.add_parser(
         "model-preflight",
@@ -948,6 +961,8 @@ def main(argv: list[str] | None = None) -> int:
             max_steps=args.max_steps,
             tool_timeout_seconds=args.tool_timeout_seconds,
             harvest=args.harvest,
+            resume=args.resume,
+            plain=args.plain,
         )
     if args.command == "model-preflight":
         return _run_model_preflight(
@@ -1433,8 +1448,13 @@ def _run_code(
     max_steps: int,
     tool_timeout_seconds: int,
     harvest: bool,
+    resume: str | None = None,
+    plain: bool = False,
 ) -> int:
     """Launch the interactive GLM 5.2 coding agent (`self-harness code`)."""
+
+    import uuid
+    from datetime import UTC, datetime
 
     from self_harness.agentic_session import (
         HOST_EXEC_WARNING_LINES,
@@ -1443,6 +1463,7 @@ def _run_code(
     )
     from self_harness.cli_agent import FailureHarvester, InteractiveSession, run_repl
     from self_harness.cli_agent.session import load_session_harness
+    from self_harness.cli_agent.sessions import latest_session, load_session
     from self_harness.exceptions import AgenticRunnerError
 
     workdir = root.resolve()
@@ -1461,6 +1482,20 @@ def _run_code(
         print(line)
     print()
 
+    # Resolve a session to resume (explicit id, or most recent), or mint a fresh one.
+    resumed = None
+    if resume == "__latest__":
+        resumed = latest_session(workdir)
+        if resumed is None:
+            print("no saved sessions to resume; starting a new one")
+    elif resume:
+        resumed = load_session(workdir, resume)
+        if resumed is None:
+            print(f"no session '{resume}' found; starting a new one")
+
+    now = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    session_id = resumed.id if resumed is not None else f"code-{now}-{uuid.uuid4().hex[:8]}"
+
     harness, evolving = load_session_harness(state_path)
     harvester = FailureHarvester(inbox_dir=inbox, workdir=workdir, enabled=harvest)
     session = InteractiveSession(
@@ -1472,8 +1507,19 @@ def _run_code(
         max_steps=max_steps,
         tool_timeout_seconds=tool_timeout_seconds,
         evolving=evolving,
+        history=list(resumed.history) if resumed is not None else [],
+        turn_index=len(resumed.turns) if resumed is not None else 0,
     )
-    return run_repl(session)
+    if resumed is not None:
+        harvester.seed_written(resumed.harvested)
+        print(f"resumed session {session_id} ({len(resumed.turns)} prior turn(s))")
+    return run_repl(
+        session,
+        root=workdir,
+        session_id=session_id,
+        timestamp=now,
+        plain=plain,
+    )
 
 
 def _run_glm_agentic_demo(

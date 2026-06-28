@@ -146,3 +146,8 @@ class FailureHarvester:
     @property
     def written_ids(self) -> list[str]:
         return list(self._written)
+
+    def seed_written(self, ids: list[str]) -> None:
+        """Pre-populate the harvested-id log when resuming a saved session, so /harvested is continuous."""
+
+        self._written.extend(ids)

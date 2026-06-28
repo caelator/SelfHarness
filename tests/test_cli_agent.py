@@ -177,3 +177,101 @@ def test_session_harvests_failing_command(tmp_path: Path) -> None:
     result = session.send("run the tests")
     assert result.harvested  # a failing-check bundle was produced
     assert list(inbox.glob("*.json"))
+
+
+def test_session_streaming_callbacks_and_tool_events(tmp_path: Path) -> None:
+    # When on_text_delta is supplied the blocking stub is bypassed; but here we inject the stub directly
+    # and just confirm the tool-event callback fires with the right (name, summary, ok) per tool.
+    transport = ScriptedTransport([_bash("true"), _end("done")])
+    h = FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path)
+    session = InteractiveSession(
+        api_key="k", base_url="https://example/api/anthropic", workdir=tmp_path,
+        harness=initial_harness(), harvester=h,
+    )
+    session._transport = transport
+    events: list[tuple[str, str, bool]] = []
+    # on_text_delta=None keeps the injected blocking transport, so we exercise on_tool_event only.
+    session.send("go", on_tool_event=lambda n, s, ok: events.append((n, s, ok)))
+    assert events == [("bash", "$ true", True)]
+
+
+# ---- @file context expansion ------------------------------------------------------------------------
+
+
+def test_expand_mentions_inlines_workdir_file(tmp_path: Path) -> None:
+    from self_harness.cli_agent.context import expand_mentions
+
+    (tmp_path / "notes.txt").write_text("hello from notes", encoding="utf-8")
+    augmented, inlined = expand_mentions("explain @notes.txt please", tmp_path)
+    assert inlined == ["notes.txt"]
+    assert "Contents of notes.txt:" in augmented
+    assert "hello from notes" in augmented
+
+
+def test_expand_mentions_rejects_escape_and_missing(tmp_path: Path) -> None:
+    from self_harness.cli_agent.context import expand_mentions
+
+    # A traversal escape and a missing file both resolve to nothing; the line is returned unchanged.
+    line, inlined = expand_mentions("see @../secret.txt and @nope.txt", tmp_path)
+    assert inlined == []
+    assert line == "see @../secret.txt and @nope.txt"
+
+
+def test_expand_mentions_trims_trailing_punctuation(tmp_path: Path) -> None:
+    from self_harness.cli_agent.context import expand_mentions
+
+    (tmp_path / "README.md").write_text("# Title", encoding="utf-8")
+    _, inlined = expand_mentions("look at @README.md.", tmp_path)
+    assert inlined == ["README.md"]
+
+
+# ---- session persistence + resume -------------------------------------------------------------------
+
+
+def test_session_record_round_trips(tmp_path: Path) -> None:
+    from self_harness.cli_agent.sessions import (
+        SessionRecord,
+        latest_session,
+        list_sessions,
+        load_session,
+        save_session,
+    )
+
+    rec = SessionRecord(
+        id="code-A", workdir=str(tmp_path), harness_hash="abc", created_at="t0", updated_at="t1",
+        history=[{"role": "user", "content": "hi"}], turns=[{"user": "hi"}], harvested=["b1"],
+    )
+    save_session(tmp_path, rec)
+    loaded = load_session(tmp_path, "code-A")
+    assert loaded is not None
+    assert loaded.history == [{"role": "user", "content": "hi"}]
+    assert loaded.harvested == ["b1"]
+    assert [r.id for r in list_sessions(tmp_path)] == ["code-A"]
+    assert latest_session(tmp_path) is not None
+    assert load_session(tmp_path, "missing") is None
+
+
+def test_list_sessions_orders_by_updated_at(tmp_path: Path) -> None:
+    from self_harness.cli_agent.sessions import SessionRecord, list_sessions, save_session
+
+    save_session(tmp_path, SessionRecord(id="old", workdir=".", harness_hash="h", updated_at="t1"))
+    save_session(tmp_path, SessionRecord(id="new", workdir=".", harness_hash="h", updated_at="t9"))
+    assert [r.id for r in list_sessions(tmp_path)] == ["new", "old"]
+
+
+# ---- plain renderer (no ANSI under non-tty) ---------------------------------------------------------
+
+
+def test_plain_renderer_streams_without_ansi(capsys) -> None:  # type: ignore[no-untyped-def]
+    from self_harness.cli_agent.ui import ConsoleRenderer
+
+    renderer = ConsoleRenderer(plain=True)
+    assert renderer.plain is True
+    renderer.start_stream()
+    renderer.push_delta("hello ")
+    renderer.push_delta("world")
+    renderer.end_stream()
+    renderer.tool_event("bash", "$ ls", True)
+    out = capsys.readouterr().out
+    assert "hello world" in out
+    assert "\x1b[" not in out  # no ANSI escape codes in plain mode

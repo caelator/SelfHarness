@@ -623,10 +623,14 @@ like Codex CLI or Claude Code, but wrapping GLM 5.2 and driven by the
 **self-improving harness**. It opens a multi-turn session in the current
 directory; GLM acts on your real repo with `bash`/`read_file`/`write_file` tools
 (auto-run, no per-command prompts), and the conversation persists across turns.
+The reply **streams token-by-token** into a rich terminal UI (live markdown,
+syntax-highlighted code, per-tool-call status, a thinking spinner); pipe the
+output or pass `--plain` for plain text.
 
 ```bash
 export ZAI_API_KEY="<z.ai coding-plan key>"
 self-harness code                      # in your project directory
+self-harness code --resume             # continue your most recent session
 ```
 
 What makes it different from a static-harness CLI: it closes a **self-improvement
@@ -637,11 +641,19 @@ failures become held-in tasks that evolve the harness — so the agent gets bett
 *at your codebase* the more you use it. Both commands share one
 `runs/harness_state.json`, so improvements flow straight back into the CLI.
 
-Slash commands: `/help`, `/harness` (active harness + lineage), `/harvested`
-(failures captured this session), `/reset`, `/cwd`, `/exit`. Flags: `--root`,
-`--harness-state`, `--inbox-dir`, `--max-steps`, `--tool-timeout-seconds`,
-`--no-harvest` (disable the flywheel). Auto-run executes model-generated commands
-directly on the host (no container) — use it on repos you trust.
+Type `@path/to/file` in a message to inline that file's contents into the turn.
+Sessions persist under `runs/sessions/` and resume with `--resume [id]` (list
+saved sessions in-session with `/sessions`). Slash commands: `/help`, `/harness`
+(active harness + lineage), `/harvested` (failures captured this session),
+`/sessions`, `/reset`, `/cwd`, `/exit`. Flags: `--root`, `--harness-state`,
+`--inbox-dir`, `--max-steps`, `--tool-timeout-seconds`, `--no-harvest` (disable
+the flywheel), `--resume [id]`, `--plain`. Auto-run executes model-generated
+commands directly on the host (no container) — use it on repos you trust.
+
+> `self-harness code` is the one component with a third-party runtime dependency
+> (`rich`, for the terminal UI). It is imported lazily and only by the CLI's UI
+> module, so the library, engine, and web console still import with zero
+> third-party runtime dependencies.
 
 ## Operator Console
 
