@@ -18,6 +18,10 @@ ADDRESSABLE_SURFACE_BY_MECHANISM: dict[str, tuple[str, ...]] = {
     # mis-used a tool) is addressable by the failure-recovery guidance.
     "codex-judge": ("system_prompt", "verification", "execution"),
     "agent-solver-error": ("failure_recovery", "execution"),
+    # System-level failures detected by the loop watchdog. A loop_timeout means the run exceeded
+    # its wall-clock budget — the harness should add timeout awareness and early-exit guidance so
+    # the agent doesn't hang on unresponsive API calls or infinite retry loops.
+    "loop_timeout": ("failure_recovery", "execution", "runtime_policy"),
 }
 
 

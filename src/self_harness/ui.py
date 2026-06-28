@@ -768,6 +768,12 @@ class HarnessUiApp:
                 self._autoloop["active"] = False
             _log("autoloop stopped")
 
+    # ── Run watchdog ──────────────────────────────────────────────────
+    # Maximum wall-clock time for a single agentic run. If exceeded, the run
+    # is killed and recorded as a timeout failure that the harness evolution
+    # loop can learn from (mechanism="loop_timeout").
+    RUN_TIMEOUT_SECONDS: int = 600  # 10 minutes per run
+
     def _run_job(self, job_id: str, *, evolve: bool = True, corpus_path: Path | None = None) -> None:
         with self._lock:
             job = self._jobs[job_id]
@@ -778,25 +784,73 @@ class HarnessUiApp:
             path = job.path
             run_mode = job.run_mode
         _log(f"run {job.run_id} started ({run_mode}, rounds={config.get('rounds')}, evolve={evolve})")
-        try:
-            usage_lock = self._lock
 
-            def _accumulate_usage(counts: dict[str, int]) -> None:
-                with usage_lock:
-                    accumulated = self._jobs[job_id].token_usage
-                    for key, value in counts.items():
-                        accumulated[key] = accumulated.get(key, 0) + value
+        # Run engine.run() in a worker thread so we can enforce a wall-clock timeout.
+        # If the thread doesn't finish within RUN_TIMEOUT_SECONDS, we declare the run
+        # timed out — this prevents a hung API call from blocking the loop forever.
+        engine_result: dict[str, Any] = {}
+        timeout_error: str | None = None
 
-            initial_spec = self._load_persisted_harness() if evolve else None
-            engine = self._build_engine(
-                run_mode=run_mode,
-                config=config,
-                out_dir=path,
-                initial_spec=initial_spec,
-                on_usage=_accumulate_usage,
-                corpus_path=corpus_path,
+        def _worker() -> None:
+            try:
+                usage_lock = self._lock
+
+                def _accumulate_usage(counts: dict[str, int]) -> None:
+                    with usage_lock:
+                        accumulated = self._jobs[job_id].token_usage
+                        for key, value in counts.items():
+                            accumulated[key] = accumulated.get(key, 0) + value
+
+                initial_spec = self._load_persisted_harness() if evolve else None
+                engine = self._build_engine(
+                    run_mode=run_mode,
+                    config=config,
+                    out_dir=path,
+                    initial_spec=initial_spec,
+                    on_usage=_accumulate_usage,
+                    corpus_path=corpus_path,
+                )
+                summaries = engine.run()
+                engine_result["summaries"] = summaries
+            except Exception as exc:  # noqa: BLE001
+                engine_result["error"] = str(exc)
+
+        worker_thread = threading.Thread(target=_worker, daemon=True)
+        worker_thread.start()
+        worker_thread.join(timeout=self.RUN_TIMEOUT_SECONDS)
+
+        if worker_thread.is_alive():
+            # The run exceeded the timeout — it's still running in the background thread.
+            # We can't kill it (Python threads can't be force-stopped), but we declare
+            # the job timed out so the loop moves on.
+            timeout_error = (
+                f"run timed out after {self.RUN_TIMEOUT_SECONDS}s — "
+                f"likely a hung API call or unresponsive solver"
             )
-            summaries = engine.run()
+            _log(f"run {job.run_id} TIMEOUT: {timeout_error}")
+
+        # Check for worker errors
+        if timeout_error is None and "error" in engine_result:
+            timeout_error = engine_result["error"]
+
+        if timeout_error is not None:
+            with self._lock:
+                job = self._jobs[job_id]
+                job.status = "failed"
+                job.ended_at = _now()
+                job.error = timeout_error
+                job.events.append("failed")
+            _log(f"run {job.run_id} FAILED: {timeout_error}")
+            # Record the timeout as a system-level failure for the harness evolution.
+            # This is the key self-improvement hook: the next run's failure miner
+            # will see mechanism="loop_timeout" and the proposer can add timeout
+            # guidance to the harness.
+            self._record_system_failure(job.run_id, "loop_timeout", timeout_error)
+            return
+
+        # Success path
+        try:
+            summaries = engine_result.get("summaries", [])
             promotion: dict[str, Any] | None = None
             if evolve:
                 self._persist_final_harness(path, summaries)
@@ -819,7 +873,7 @@ class HarnessUiApp:
                     _log(f"run {job.run_id}: reviewer-approved edit integrated into harness.py (gate passed)")
                 elif promotion.get("ok") is False:
                     _log(f"run {job.run_id}: auto-integration skipped — {promotion.get('message')}")
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             with self._lock:
                 job = self._jobs[job_id]
                 job.status = "failed"
@@ -827,6 +881,43 @@ class HarnessUiApp:
                 job.error = str(exc)
                 job.events.append("failed")
             _log(f"run {job.run_id} FAILED: {exc}")
+
+    def _record_system_failure(self, run_id: str, mechanism: str, message: str) -> None:
+        """Record a system-level failure (timeout, crash, etc.) so the harness
+        evolution loop can learn from it.
+
+        Writes a failure bundle to the inbox that the next run will ingest as a
+        held-in task. The failure has mechanism=loop_timeout so the proposer
+        can propose adding timeout/retry guidance to the harness.
+        """
+        import json
+        import time
+
+        inbox_path = self.inbox_dir / f"system-{mechanism}-{int(time.time())}.json"
+        inbox_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle = {
+            "task_id": f"system-{mechanism}-{run_id}",
+            "split": "held_in",
+            "failure_mode": mechanism,
+            "description": message,
+            "source": "loop-watchdog",
+            "created_at": _now(),
+            "trace": [
+                {"kind": "system", "message": message, "metadata": {"run_id": run_id}},
+            ],
+            "outcome": {
+                "passed": False,
+                "terminal_cause": "timeout" if mechanism == "loop_timeout" else mechanism,
+                "causal_status": "system_failure",
+                "mechanism": mechanism,
+                "message": message,
+            },
+        }
+        try:
+            inbox_path.write_text(json.dumps(bundle, indent=2) + "\n", encoding="utf-8")
+            _log(f"watchdog: recorded {mechanism} failure to inbox ({inbox_path.name})")
+        except OSError:
+            pass
 
     def _build_engine(
         self,
