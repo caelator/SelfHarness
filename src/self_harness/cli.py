@@ -225,6 +225,42 @@ def main(argv: list[str] | None = None) -> int:
     )
     ui_parser.set_defaults(generation_guard=False)
 
+    code_parser = subparsers.add_parser(
+        "code",
+        help="interactive GLM 5.2 coding agent in the current directory (auto-runs tools; harvests failures)",
+    )
+    code_parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path.cwd(),
+        help="working directory the agent acts in (default: current directory)",
+    )
+    code_parser.add_argument(
+        "--harness-state",
+        type=Path,
+        default=None,
+        help="evolving harness lineage file to drive the agent (default: <root>/runs/harness_state.json)",
+    )
+    code_parser.add_argument(
+        "--inbox-dir",
+        type=Path,
+        default=None,
+        help="where harvested failing commands are dropped for the loop (default: <root>/runs/inbox)",
+    )
+    code_parser.add_argument(
+        "--max-steps", type=int, default=24, help="max agent tool-calling steps per turn"
+    )
+    code_parser.add_argument(
+        "--tool-timeout-seconds", type=int, default=30, help="per-command timeout for tool calls"
+    )
+    code_parser.add_argument(
+        "--no-harvest",
+        dest="harvest",
+        action="store_false",
+        help="do not harvest failing commands into the self-improvement inbox",
+    )
+    code_parser.set_defaults(harvest=True)
+
     model_preflight_parser = subparsers.add_parser(
         "model-preflight",
         help="check a paper model backend (e.g. GLM 5.2) for reachability without claiming reproduction",
@@ -904,6 +940,15 @@ def main(argv: list[str] | None = None) -> int:
             task_generation=args.task_generation,
             generation_guard=args.generation_guard,
         )
+    if args.command == "code":
+        return _run_code(
+            root=args.root,
+            harness_state=args.harness_state,
+            inbox_dir=args.inbox_dir,
+            max_steps=args.max_steps,
+            tool_timeout_seconds=args.tool_timeout_seconds,
+            harvest=args.harvest,
+        )
     if args.command == "model-preflight":
         return _run_model_preflight(
             mode=args.mode,
@@ -1378,6 +1423,57 @@ def _run_python_demo(
     _print_summaries(summaries)
     print(f"Artifacts: {out_dir}")
     return 0
+
+
+def _run_code(
+    *,
+    root: Path,
+    harness_state: Path | None,
+    inbox_dir: Path | None,
+    max_steps: int,
+    tool_timeout_seconds: int,
+    harvest: bool,
+) -> int:
+    """Launch the interactive GLM 5.2 coding agent (`self-harness code`)."""
+
+    from self_harness.agentic_session import (
+        HOST_EXEC_WARNING_LINES,
+        resolve_zai_api_key,
+        resolve_zai_base_url,
+    )
+    from self_harness.cli_agent import FailureHarvester, InteractiveSession, run_repl
+    from self_harness.cli_agent.session import load_session_harness
+    from self_harness.exceptions import AgenticRunnerError
+
+    workdir = root.resolve()
+    runs_dir = workdir / "runs"
+    state_path = (harness_state or runs_dir / "harness_state.json").resolve()
+    inbox = (inbox_dir or runs_dir / "inbox").resolve()
+
+    try:
+        api_key = resolve_zai_api_key()
+    except AgenticRunnerError as exc:
+        print(f"error: {exc}")
+        return 2
+    base_url = resolve_zai_base_url()
+
+    for line in HOST_EXEC_WARNING_LINES:
+        print(line)
+    print()
+
+    harness, evolving = load_session_harness(state_path)
+    harvester = FailureHarvester(inbox_dir=inbox, workdir=workdir, enabled=harvest)
+    session = InteractiveSession(
+        api_key=api_key,
+        base_url=base_url,
+        workdir=workdir,
+        harness=harness,
+        harvester=harvester,
+        max_steps=max_steps,
+        tool_timeout_seconds=tool_timeout_seconds,
+        evolving=evolving,
+    )
+    return run_repl(session)
 
 
 def _run_glm_agentic_demo(

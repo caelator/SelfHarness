@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from self_harness.adapters.agentic.tools import (
     DEFAULT_TOOL_TIMEOUT_SECONDS,
+    ToolResult,
     execute_tool,
     tool_schemas,
 )
@@ -15,6 +16,10 @@ from self_harness.exceptions import LLMClientError
 from self_harness.types import TraceEvent
 
 DEFAULT_MAX_STEPS = 12
+
+# Observer fired after each tool executes (tool name, its input, the result). Lets an interactive caller
+# react to tool activity — e.g. harvest failing commands — without the loop knowing about that concern.
+ToolObserver = Callable[[str, Mapping[str, Any], ToolResult], None]
 
 
 @dataclass
@@ -40,6 +45,8 @@ def run_agent_loop(
     max_steps: int = DEFAULT_MAX_STEPS,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
+    history: list[dict[str, Any]] | None = None,
+    on_tool_result: ToolObserver | None = None,
 ) -> AgentLoopResult:
     """Drive a tool-calling agent until it stops, hits the step budget, or errors.
 
@@ -47,10 +54,17 @@ def run_agent_loop(
     tool execution is recorded as a stable :class:`TraceEvent` so downstream clustering has
     low-cardinality, informative symptoms. The loop never raises on tool errors — those are fed back
     to the model as ``tool_result`` blocks with ``is_error`` so it can recover.
+
+    For single-shot eval use, omit ``history``: the loop builds its own message list from ``task_prompt``
+    and discards it on return (unchanged behaviour). For interactive/multi-turn use, pass a ``history``
+    list: the loop seeds from it, appends the new user turn plus all assistant/tool turns to it in place,
+    and the caller retains full conversation state across calls. ``on_tool_result`` fires after each tool
+    runs so an interactive caller can observe activity (e.g. harvest failing commands).
     """
 
     tools = tool_schemas()
-    messages: list[dict[str, Any]] = [{"role": "user", "content": task_prompt}]
+    messages: list[dict[str, Any]] = history if history is not None else []
+    messages.append({"role": "user", "content": task_prompt})
     trace: list[TraceEvent] = []
     usage_totals: dict[str, int] = {}
     tool_calls = 0
@@ -117,6 +131,8 @@ def run_agent_loop(
                     message=f"tool {name} {'error' if result.is_error else 'ok'}",
                 )
             )
+            if on_tool_result is not None:
+                on_tool_result(name, tool_input_map, result)
             tool_results.append(
                 {
                     "type": "tool_result",

@@ -616,6 +616,33 @@ self-harness glm-agentic-demo examples/agentic_corpus.json \
 > Terminal-Bench reproduction (different task set, no Harbor). Full details:
 > `docs/operations/agentic_runner.md`.
 
+## Coding Agent CLI (`self-harness code`)
+
+`self-harness code` is an interactive GLM 5.2 coding agent for your terminal —
+like Codex CLI or Claude Code, but wrapping GLM 5.2 and driven by the
+**self-improving harness**. It opens a multi-turn session in the current
+directory; GLM acts on your real repo with `bash`/`read_file`/`write_file` tools
+(auto-run, no per-command prompts), and the conversation persists across turns.
+
+```bash
+export ZAI_API_KEY="<z.ai coding-plan key>"
+self-harness code                      # in your project directory
+```
+
+What makes it different from a static-harness CLI: it closes a **self-improvement
+flywheel**. Every failing check/build/test command GLM hits during a session is
+harvested into the shared inbox (`runs/inbox/`) as a learnable task. Run the
+continuous loop (`self-harness ui`, *Start continuous loop*) and those real
+failures become held-in tasks that evolve the harness — so the agent gets better
+*at your codebase* the more you use it. Both commands share one
+`runs/harness_state.json`, so improvements flow straight back into the CLI.
+
+Slash commands: `/help`, `/harness` (active harness + lineage), `/harvested`
+(failures captured this session), `/reset`, `/cwd`, `/exit`. Flags: `--root`,
+`--harness-state`, `--inbox-dir`, `--max-steps`, `--tool-timeout-seconds`,
+`--no-harvest` (disable the flywheel). Auto-run executes model-generated commands
+directly on the host (no container) — use it on repos you trust.
+
 ## Operator Console
 
 `self-harness ui` serves a single-page operator console (stdlib HTTP server,
