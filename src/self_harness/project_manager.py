@@ -21,6 +21,138 @@ from pathlib import Path
 from typing import Any
 
 
+@dataclass
+class GitSyncResult:
+    """Result of a git commit/merge/push operation."""
+    committed: bool
+    pushed: bool
+    merged: bool
+    remote_ahead: list[str]
+    errors: list[str]
+    commit_sha: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        """True if no errors occurred (committed or nothing-to-commit, pushed successfully)."""
+        return not self.errors
+
+
+def git_sync(
+    working_dir: str,
+    message: str,
+    *,
+    author_name: str = "self-harness",
+    author_email: str = "self-harness@local",
+) -> GitSyncResult:
+    """Commit, merge, and push a project directory to its git remote.
+
+    This runs the full sequence:
+    1. ``git add -A`` — stage all changes
+    2. If nothing staged, return early (nothing to commit)
+    3. ``git commit`` with the given message
+    4. ``git fetch origin``
+    5. If remote is ahead, ``git merge origin/<branch>``
+    6. ``git push origin <branch>``
+
+    Returns a GitSyncResult with the outcome. Never raises — errors are
+    captured in the result so the caller can display them.
+    """
+    import subprocess
+
+    result = GitSyncResult(
+        committed=False, pushed=False, merged=False, remote_ahead=[], errors=[]
+    )
+
+    def _run_git(args: list[str]) -> tuple[int, str, str]:
+        try:
+            proc = subprocess.run(
+                ["git"] + args,
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            return -1, "", str(exc)
+
+    # 1. Stage everything
+    code, _out, err = _run_git(["add", "-A"])
+    if code != 0:
+        result.errors.append(f"git add failed: {err}")
+        return result
+
+    # 2. Check if there's anything to commit
+    code, out, _err = _run_git(["diff", "--cached", "--quiet"])
+    if code == 0:
+        # Nothing staged — working tree is clean
+        pass  # continue to push in case remote is behind
+    else:
+        # 3. Commit
+        code, out, err = _run_git([
+            "-c", f"user.name={author_name}",
+            "-c", f"user.email={author_email}",
+            "commit", "-m", message,
+        ])
+        if code != 0:
+            result.errors.append(f"git commit failed: {err}")
+            return result
+        result.committed = True
+        # Extract commit SHA
+        code2, sha, _err2 = _run_git(["rev-parse", "--short", "HEAD"])
+        if code2 == 0:
+            result.commit_sha = sha
+
+    # 4. Check for remote
+    code, out, _err = _run_git(["remote"])
+    if code != 0 or not out:
+        # No remote configured — commit only
+        return result
+    remote = out.splitlines()[0].strip() if out else "origin"
+
+    # 5. Fetch
+    code, _out, _err = _run_git(["fetch", remote])
+    if code != 0:
+        # Fetch failed (offline?) — still committed, just can't push
+        result.errors.append(f"git fetch failed (offline?): {_err}")
+        return result
+
+    # 6. Determine current branch
+    code, branch_out, _err = _run_git(["rev-parse", "--abbrev-ref", "HEAD"])
+    if code != 0:
+        result.errors.append("cannot determine current branch")
+        return result
+    branch = branch_out.strip()
+
+    # 7. Check if remote is ahead
+    code, out, _err = _run_git(["rev-list", "--count", f"HEAD..{remote}/{branch}"])
+    if code == 0 and out.strip():
+        ahead_count = int(out.strip())
+        if ahead_count > 0:
+            result.remote_ahead = [f"{ahead_count} commits on {remote}/{branch}"]
+            # 8. Merge
+            code, out, err = _run_git([
+                "-c", f"user.name={author_name}",
+                "-c", f"user.email={author_email}",
+                "merge", f"{remote}/{branch}", "--no-edit",
+            ])
+            if code != 0:
+                result.errors.append(f"git merge failed: {err}")
+                # Abort the merge to leave clean state
+                _run_git(["merge", "--abort"])
+                return result
+            result.merged = True
+
+    # 9. Push
+    code, _out, err = _run_git(["push", remote, branch])
+    if code != 0:
+        result.errors.append(f"git push failed: {err}")
+        return result
+    result.pushed = True
+
+    return result
+
+
 def projects_dir() -> Path:
     """Directory where saved projects live."""
     d = Path.home() / ".config" / "self-harness" / "projects"

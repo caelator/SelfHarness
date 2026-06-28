@@ -526,11 +526,33 @@ def _menu_save_project() -> None:
         held_in_score=held_in,
         held_out_score=held_out,
     )
+
+    # Commit, merge, and push to GitHub
     console.blank()
-    console.status(f"Saved '{name}' — resume it later with: self-harness resume {project.id.split('-')[-1]}", "success")
+    console.line("Syncing to GitHub...", "system")
+    sync = project_manager.git_sync(
+        str(Path.cwd()),
+        f"save project: {name}",
+    )
+
+    console.status(f"Saved '{name}'", "success")
     console.line(f"  directory: {Path.cwd()}", "system")
     if harness_state:
         console.line(f"  harness:  captured ({rounds} rounds)", "system")
+
+    # Git status
+    if sync.committed:
+        sha = sync.commit_sha or "?"
+        console.status(f"committed {sha}", "success")
+    if sync.merged:
+        console.status(f"merged {', '.join(sync.remote_ahead)} from remote", "success")
+    if sync.pushed:
+        console.status("pushed to origin", "success")
+    if sync.errors:
+        for err in sync.errors:
+            console.status(err, "warn")
+
+    console.line(f"  resume:   self-harness resume {project.id.split('-')[-1]}", "accent")
     console.blank()
 
 

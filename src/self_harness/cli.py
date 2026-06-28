@@ -134,7 +134,7 @@ from self_harness.operator_promotion import (
     sign_promotion_manifest,
     verify_promotion_manifest,
 )
-from self_harness.project_manager import list_projects, load_project, save_project
+from self_harness.project_manager import git_sync, list_projects, load_project, save_project
 from self_harness.proposer import HeuristicProposer
 from self_harness.reporting import write_benchmark_report
 from self_harness.reproduction_readiness import (
@@ -1561,17 +1561,38 @@ def _run_save(args: argparse.Namespace) -> int:
         harness_state=harness_state,
         notes=args.notes,
     )
+
+    # Commit, merge, and push to GitHub
+    sync = git_sync(
+        str(Path.cwd()),
+        f"save project: {name}",
+    )
+
     if args.json:
         print(json.dumps({
             "id": project.id,
             "name": project.name,
             "working_dir": project.working_dir,
             "saved_at": project.saved_at,
+            "git_committed": sync.committed,
+            "git_pushed": sync.pushed,
+            "git_merged": sync.merged,
+            "git_errors": sync.errors,
         }))
     else:
         print(f"Saved '{name}'")
         print(f"  directory: {project.working_dir}")
         print(f"  resume:    self-harness resume {project.id.split('-')[-1]}")
+        if sync.committed:
+            sha = sync.commit_sha or "?"
+            print(f"  git:       committed {sha}")
+        if sync.merged:
+            print(f"  git:       merged {', '.join(sync.remote_ahead)}")
+        if sync.pushed:
+            print("  git:       pushed to origin")
+        if sync.errors:
+            for err in sync.errors:
+                print(f"  git:       {err}", file=sys.stderr)
     return 0
 
 
