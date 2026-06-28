@@ -215,14 +215,15 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
     import time
 
     from self_harness.agentic_session import HOST_EXEC_WARNING_LINES
+    from self_harness.console_style import console
     from self_harness.loop_paths import loop_root
     from self_harness.ui import HarnessUiApp
 
     root = loop_root()
 
     for line in HOST_EXEC_WARNING_LINES:
-        print(line)
-    print()
+        console.line(line, "warn")
+    console.blank()
 
     app = HarnessUiApp(
         root=root,
@@ -232,7 +233,7 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
     )
     result = app.start_autoloop({"rounds": rounds, "seed": seed, "evaluation_repeats": 1})
     if not result.get("ok"):
-        print(f"could not start loop: {result.get('message')}")
+        console.error(f"could not start loop: {result.get('message')}")
         return 1
 
     # Translate SIGTERM into KeyboardInterrupt so the graceful-stop path below handles both.
@@ -241,7 +242,8 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
 
     signal.signal(signal.SIGTERM, _on_term)
 
-    print("Continuous self-improvement loop started. Press Ctrl-C to stop.\n", flush=True)
+    console.status("Continuous self-improvement loop started. Press Ctrl-C to stop.", "success")
+    console.blank()
     try:
         while True:
             time.sleep(10)
@@ -249,19 +251,23 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
             done = state.get("runs_completed", 0)
             edits = state.get("edits_promoted", 0)
             last = state.get("last_outcome") or "running…"
-            print(f"  loop: {done} run(s) completed, {edits} edit(s) promoted — {last}", flush=True)
+            console.line(
+                f"  loop: {done} run(s) completed, {edits} edit(s) promoted — {last}",
+                "accent" if edits else "system",
+            )
             if not state.get("active") and state.get("error"):
-                print(f"  loop error: {state['error']}", flush=True)
+                console.error(f"loop error: {state['error']}")
                 return 1
     except KeyboardInterrupt:
-        print("\nstopping loop after the current run…", flush=True)
+        console.blank()
+        console.status("stopping loop after the current run…", "warn")
         app.stop_autoloop()
         # Give the controller a moment to observe the stop flag.
         for _ in range(6):
             if not app.state().get("autoloop", {}).get("active"):
                 break
             time.sleep(0.5)
-        print("loop stopped.", flush=True)
+        console.status("loop stopped.", "success")
         return 0
 
 

@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from self_harness.console_style import console
 from self_harness.loop_paths import loop_root
 
 
@@ -89,8 +90,9 @@ def start_background(*, rounds: int = 1, seed: int = 0) -> int:
 
     existing = is_running()
     if existing is not None:
-        print(f"loop already running in the background (pid {existing}).")
-        print("  status: self-harness loop status\n  stop:   self-harness loop stop")
+        console.status(f"loop already running in the background (pid {existing}).", "warn")
+        console.line("  status: self-harness loop status", "system")
+        console.line("  stop:   self-harness loop stop", "system")
         return 0
 
     log = logfile()
@@ -108,10 +110,10 @@ def start_background(*, rounds: int = 1, seed: int = 0) -> int:
     finally:
         log_handle.close()
     pidfile().write_text(str(proc.pid) + "\n", encoding="utf-8")
-    print(f"continuous self-improvement loop started in the background (pid {proc.pid}).")
-    print(f"  log:    {log}")
-    print("  status: self-harness loop status")
-    print("  stop:   self-harness loop stop")
+    console.status(f"continuous self-improvement loop started in the background (pid {proc.pid}).", "success")
+    console.line(f"  log:    {log}", "system")
+    console.line("  status: self-harness loop status", "system")
+    console.line("  stop:   self-harness loop stop", "system")
     return 0
 
 
@@ -122,24 +124,27 @@ def stop_background(*, timeout_seconds: float = 60.0) -> int:
 
     pid = is_running()
     if pid is None:
-        print("no background loop is running.")
+        console.status("no background loop is running.", "system")
         return 0
-    print(f"stopping background loop (pid {pid}); it will finish the current run first…")
+    console.status(f"stopping background loop (pid {pid}); it will finish the current run first…", "warn")
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pidfile().unlink(missing_ok=True)
-        print("loop already exited.")
+        console.status("loop already exited.", "system")
         return 0
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         _reap_if_child(pid)
         if not _alive(pid):
             pidfile().unlink(missing_ok=True)
-            print("loop stopped.")
+            console.status("loop stopped.", "success")
             return 0
         time.sleep(0.5)
-    print(f"loop did not stop within {timeout_seconds:.0f}s; it may be mid-run. Re-run `loop stop` to retry.")
+    console.status(
+        f"loop did not stop within {timeout_seconds:.0f}s; it may be mid-run. Re-run `loop stop` to retry.",
+        "warn",
+    )
     return 1
 
 
@@ -148,17 +153,17 @@ def status(*, tail_lines: int = 12) -> int:
 
     pid = is_running()
     if pid is None:
-        print("background loop: not running")
-        print("  start: self-harness loop --background")
+        console.status("background loop: not running", "system")
+        console.line("  start: self-harness loop --background", "system")
         return 0
-    print(f"background loop: RUNNING (pid {pid})")
-    print(f"  log: {logfile()}")
+    console.status(f"background loop: RUNNING (pid {pid})", "success")
+    console.line(f"  log: {logfile()}", "system")
     lines = _tail(logfile(), tail_lines)
     if lines:
-        print("  recent activity:")
+        console.line("  recent activity:", "heading")
         for line in lines:
-            print(f"    {line}")
-    print("  stop: self-harness loop stop")
+            console.line(f"    {line}", "system")
+    console.line("  stop: self-harness loop stop", "system")
     return 0
 
 

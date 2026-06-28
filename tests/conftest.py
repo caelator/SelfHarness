@@ -18,3 +18,8 @@ def _isolate_user_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch: 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg_root))
     for var in ("ZAI_API_KEY", "ZAI_BASE_URL", "ZAI_MODEL"):
         monkeypatch.delenv(var, raising=False)
+    # Force the shared styled console into plain mode so output assertions never see ANSI escapes
+    # (the renderer would otherwise colorize when the test runner happens to have a TTY).
+    from self_harness import console_style
+
+    console_style.reset_for_test(force_plain=True)

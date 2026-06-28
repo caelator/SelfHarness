@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from self_harness import user_config
+from self_harness.console_style import console
 
 # ---------------------------------------------------------------------------------------------------
 # Help content — plain-language, grouped, not the raw argparse dump.
@@ -169,11 +170,24 @@ def print_help(topic: str | None = None) -> int:
     key = (topic or "overview").strip().lower()
     key = _HELP_ALIASES.get(key, key)
     if key not in HELP_TOPICS:
-        print(f"No help topic '{topic}'. Available topics:")
-        print("  " + ", ".join(HELP_TOPICS))
+        console.status(f"No help topic '{topic}'. Available topics:", "warn")
+        console.line("  " + ", ".join(HELP_TOPICS), "accent")
         return 1
-    print(HELP_TOPICS[key])
+    _render_help_body(HELP_TOPICS[key])
     return 0
+
+
+def _render_help_body(body: str) -> None:
+    """Print a help topic, styling section headings (unindented non-blank lines) and command examples."""
+
+    for line in body.splitlines():
+        if not line.strip():
+            console.blank()
+        elif not line.startswith(" "):
+            # Top-level heading line (e.g. "What it is", "Code — the interactive coding agent").
+            console.line(line, "heading")
+        else:
+            console.line(line)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -202,72 +216,74 @@ def run_settings(argv: list[str]) -> int:
     action = argv[0]
     rest = argv[1:]
     if action == "path":
-        print(cfg.path)
+        print(cfg.path)  # machine-readable: keep plain
         return 0
     if action == "show":
         _print_settings(cfg)
         return 0
     if action == "get":
         if not rest:
-            print("usage: self-harness settings get <key>", file=sys.stderr)
+            console.error("usage: self-harness settings get <key>")
             return 2
         value = cfg.get(rest[0])
         if rest[0] in ("api_key",) and isinstance(value, str):
             value = user_config.mask_secret(value)
-        print("" if value is None else value)
+        print("" if value is None else value)  # machine-readable: keep plain
         return 0
     if action == "set":
         if len(rest) < 2:
-            print("usage: self-harness settings set <key> <value>", file=sys.stderr)
+            console.error("usage: self-harness settings set <key> <value>")
             return 2
         try:
             cfg.set(rest[0], " ".join(rest[1:]))
         except (KeyError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
+            console.error(str(exc))
             return 2
         cfg.save()
         shown = user_config.mask_secret(str(cfg.get(rest[0]))) if rest[0] == "api_key" else cfg.get(rest[0])
-        print(f"set {rest[0]} = {shown}")
+        console.status(f"set {rest[0]} = {shown}", "success")
         return 0
     if action == "unset":
         if not rest:
-            print("usage: self-harness settings unset <key>", file=sys.stderr)
+            console.error("usage: self-harness settings unset <key>")
             return 2
         cfg.unset(rest[0])
         cfg.save()
-        print(f"unset {rest[0]}")
+        console.status(f"unset {rest[0]}", "success")
         return 0
-    print(f"unknown settings action: {action} (use show|get|set|unset|path)", file=sys.stderr)
+    console.error(f"unknown settings action: {action} (use show|get|set|unset|path)")
     return 2
 
 
 def _print_settings(cfg: user_config.UserConfig) -> None:
-    print(f"Settings  ({cfg.path})")
+    console.heading("Settings")
+    console.line(str(cfg.path), "system")
     red = cfg.redacted()
+    rows: list[tuple[str, ...]] = []
     for key in _SETTING_LABELS:
-        label = _SETTING_LABELS[key]
         value = red.get(key, "(default)")
-        print(f"  {key:<22} {value!s:<34} {label}")
+        rows.append((key, str(value), _SETTING_LABELS[key]))
+    console.table(rows, headers=("setting", "value", "what it controls"))
 
 
 def _settings_interactive(cfg: user_config.UserConfig) -> int:
     if not _interactive():
         _print_settings(cfg)
-        print("\n(non-interactive: use `self-harness settings set <key> <value>`)")
+        console.line("\n(non-interactive: use `self-harness settings set <key> <value>`)", "system")
         return 0
     while True:
-        print()
+        console.blank()
         _print_settings(cfg)
-        print("\nEnter a key to change (e.g. api_key), or 'q' to go back.")
+        console.line("\nEnter a key to change (e.g. api_key), or 'q' to go back.", "system")
         try:
-            choice = input("settings › ").strip()
+            choice = console.prompt("settings › ", "user").strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.blank()
             return 0
         if choice in {"q", "quit", "exit", ""}:
             return 0
         if choice not in _SETTING_LABELS:
-            print(f"unknown key: {choice}")
+            console.status(f"unknown key: {choice}", "warn")
             continue
         secret = choice == "api_key"
         prompt = f"new value for {choice}" + (" (hidden)" if secret else "") + ": "
@@ -279,32 +295,39 @@ def _settings_interactive(cfg: user_config.UserConfig) -> int:
             else:
                 value = input(prompt).strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.blank()
             continue
         if not value:
-            print("(unchanged)")
+            console.line("(unchanged)", "system")
             continue
         try:
             cfg.set(choice, value)
         except (KeyError, ValueError) as exc:
-            print(f"error: {exc}")
+            console.error(str(exc))
             continue
         cfg.save()
-        print(f"saved {choice}.")
+        console.status(f"saved {choice}.", "success")
 
 
 # ---------------------------------------------------------------------------------------------------
 # Home menu.
 # ---------------------------------------------------------------------------------------------------
 
-_MENU = """\
-SelfHarness ▸ GLM 5.2
-  [1] Code      — interactive coding agent (current folder)
-  [2] Loop      — start/stop continuous self-improvement
-  [3] Console   — open the web dashboard
-  [4] Settings  — API key, model, defaults
-  [5] Help      — what everything does
-  [q] Quit"""
+_MENU_ITEMS = (
+    ("1", "Code", "interactive coding agent (current folder)"),
+    ("2", "Loop", "start/stop continuous self-improvement"),
+    ("3", "Console", "open the web dashboard"),
+    ("4", "Settings", "API key, model, defaults"),
+    ("5", "Help", "what everything does"),
+    ("q", "Quit", ""),
+)
+
+
+def _show_menu() -> None:
+    console.blank()
+    console.heading("SelfHarness ▸ GLM 5.2")
+    rows = [(f"[{key}]", name, desc) for key, name, desc in _MENU_ITEMS]
+    console.table(rows)
 
 
 def run_home() -> int:
@@ -312,22 +335,24 @@ def run_home() -> int:
 
     if not _interactive():
         # Piped / non-tty: don't hang on input() — show help so the invocation is still useful.
-        print(_TAGLINE)
-        print()
+        console.heading(_TAGLINE)
+        console.blank()
         print_help("overview")
         return 0
 
     cfg = user_config.load_config()
     if not user_config.resolve_api_key(config=cfg):
-        print("⚠ No GLM 5.2 API key set yet — choose [4] Settings to add it, or [5] Help → key.\n")
+        console.blank()
+        console.status(
+            "No GLM 5.2 API key set yet — choose [4] Settings to add it, or [5] Help → key.", "warn"
+        )
 
     while True:
-        print()
-        print(_MENU)
+        _show_menu()
         try:
-            choice = input("choose › ").strip().lower()
+            choice = console.prompt("choose › ", "user").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.blank()
             return 0
         if choice in {"q", "quit", "exit"}:
             return 0
@@ -342,46 +367,50 @@ def run_home() -> int:
         elif choice in {"5", "help", "h", "?"}:
             _menu_help()
         else:
-            print(f"'{choice}' is not an option. Pick 1-5 or q.")
+            console.status(f"'{choice}' is not an option. Pick 1-5 or q.", "warn")
 
 
 def _menu_code() -> None:
     from self_harness import cli
 
-    print("\nLaunching the coding agent in:", Path.cwd())
-    print("(type /exit inside to return to this menu)\n")
+    console.blank()
+    console.line(f"Launching the coding agent in: {Path.cwd()}", "system")
+    console.line("(type /exit inside to return to this menu)", "system")
+    console.blank()
     try:
         cli.run_code_default()
     except Exception as exc:  # noqa: BLE001 - never let a sub-action crash the whole menu.
-        print(f"error launching coding agent: {exc}")
+        console.error(f"error launching coding agent: {exc}")
 
 
 def _menu_console() -> None:
     from self_harness import cli
 
-    print("\nStarting the web console. Press Ctrl-C to stop it and return here.\n")
+    console.blank()
+    console.line("Starting the web console. Press Ctrl-C to stop it and return here.", "system")
+    console.blank()
     try:
         cli.run_console_default()
     except KeyboardInterrupt:
-        print("\n(console stopped)")
+        console.status("console stopped", "system")
     except Exception as exc:  # noqa: BLE001
-        print(f"error starting console: {exc}")
+        console.error(f"error starting console: {exc}")
 
 
 def _menu_loop() -> None:
     from self_harness import cli, loop_daemon
 
     running = loop_daemon.is_running()
-    print()
+    console.blank()
     if running is not None:
-        print(f"The continuous loop is running in the background (pid {running}).")
-        print("  [s] show status + recent activity")
-        print("  [x] stop it")
-        print("  [enter] back")
+        console.status(f"The continuous loop is running in the background (pid {running}).", "success")
+        console.line("  [s] show status + recent activity")
+        console.line("  [x] stop it")
+        console.line("  [enter] back")
         try:
-            choice = input("loop › ").strip().lower()
+            choice = console.prompt("loop › ", "user").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.blank()
             return
         if choice in {"s", "status"}:
             loop_daemon.status()
@@ -389,14 +418,14 @@ def _menu_loop() -> None:
             loop_daemon.stop_background()
         return
 
-    print("Start the continuous self-improvement loop:")
-    print("  [f] foreground — watch it live (Ctrl-C to stop)")
-    print("  [b] background — keep running after you close the terminal")
-    print("  [enter] back")
+    console.line("Start the continuous self-improvement loop:", "heading")
+    console.line("  [f] foreground — watch it live (Ctrl-C to stop)")
+    console.line("  [b] background — keep running after you close the terminal")
+    console.line("  [enter] back")
     try:
-        choice = input("loop › ").strip().lower()
+        choice = console.prompt("loop › ", "user").strip().lower()
     except (EOFError, KeyboardInterrupt):
-        print()
+        console.blank()
         return
     if choice in {"b", "background", "bg"}:
         loop_daemon.start_background()
@@ -404,22 +433,23 @@ def _menu_loop() -> None:
         try:
             cli.run_loop_default()
         except KeyboardInterrupt:
-            print("\n(loop stopped)")
+            console.status("loop stopped", "system")
         except Exception as exc:  # noqa: BLE001
-            print(f"error running loop: {exc}")
+            console.error(f"error running loop: {exc}")
 
 
 def _menu_help() -> None:
     while True:
-        print("\nHelp topics:", ", ".join(HELP_TOPICS))
+        console.blank()
+        console.line("Help topics: " + ", ".join(HELP_TOPICS), "accent")
         try:
-            topic = input("help topic (enter=overview, q=back) › ").strip().lower()
+            topic = console.prompt("help topic (enter=overview, q=back) › ", "user").strip().lower()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.blank()
             return
         if topic in {"q", "quit", "exit"}:
             return
-        print()
+        console.blank()
         print_help(topic or "overview")
 
 
