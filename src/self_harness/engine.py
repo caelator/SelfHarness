@@ -20,6 +20,7 @@ from self_harness.harness import (
 )
 from self_harness.llm_proposer import LLMClient, LLMProposer
 from self_harness.mining import cluster_failures
+from self_harness.proposal_selection import pairwise_preference, self_validate
 from self_harness.proposer import Proposer
 from self_harness.research import ResearchFindings, ResearchIntegrator
 from self_harness.types import (
@@ -230,6 +231,15 @@ class SelfHarnessEngine:
                 self.config.schema_version,
             )
 
+            # Self-validate proposals (RHO-inspired) — priority signal for ordering
+            proposal_validations: dict[str, tuple[float, str]] = {}
+            for proposal in proposals:
+                target_pattern = next(
+                    (p for p in patterns if p.id == proposal.pattern_id), None
+                )
+                validation = self_validate(proposal, target_pattern)
+                proposal_validations[proposal.id] = (validation.score, validation.reason)
+
             for proposal in proposals:
                 if proposal.invalid_reason is not None:
                     proposal_rows.append(
@@ -287,7 +297,10 @@ class SelfHarnessEngine:
                     _evaluation_rows(proposal.id, baseline, candidate_eval, self.config.schema_version)
                 )
 
-            accepted = _sort_accepted(candidate_results)
+            accepted = pairwise_preference(
+                [r for r in candidate_results if r[4].accepted],
+                baseline,
+            )
             chosen_proposals: list[Proposal] = []
             chosen_patch = HarnessPatch([])
             reverse_patch = HarnessPatch([])
