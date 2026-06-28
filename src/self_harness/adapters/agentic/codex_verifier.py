@@ -27,12 +27,13 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
 
 @dataclass(frozen=True)
 class CodexVerifier:
-    """Judge task success with the Codex CLI (``codex exec``) in a read-only sandbox.
+    """Judge task success with the Codex CLI (``codex exec``) in a workspace-write sandbox.
 
     The judge inspects the post-attempt workspace and returns a structured ``{passed, reason}``
     verdict. Tooling failures (binary missing, timeout, unparseable output) are mapped to a stable
     ``environment-error`` outcome distinct from a genuine ``verifier-fail`` so the two never cluster
-    together. The judge runs read-only and cannot modify the workspace.
+    together. The judge runs with ``-s workspace-write`` so it can execute build/test success commands
+    that write inside the temp workspace (e.g. ``cargo test``); it has no network or wider-system access.
     """
 
     binary: str = DEFAULT_CODEX_BINARY
@@ -56,8 +57,12 @@ class CodexVerifier:
             "exec",
             "--json",
             "--skip-git-repo-check",
+            # workspace-write (not read-only): the judge must be able to RUN the success command, and many
+            # success criteria are build/test commands that write inside the workspace (`cargo test` writes
+            # target/, pytest writes caches/outputs, a script writes its output file). Writes are confined
+            # to the temp workdir; network and the rest of the system remain off.
             "-s",
-            "read-only",
+            "workspace-write",
             "--cd",
             str(workdir),
             "--output-schema",

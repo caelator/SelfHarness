@@ -23,9 +23,10 @@ For each task attempt:
    is the load-bearing link: every promoted edit changes the prompt the solver receives.
 3. **Agentic loop.** GLM 5.2 acts with real tools — `bash`, `read_file`, `write_file` — executing in
    the workspace until it stops or hits the step/timeout budget. The full trajectory is recorded.
-4. **Codex judge.** `codex exec --json -s read-only --cd <workdir> --output-schema <schema>` inspects
-   the final workspace and returns a structured `{passed, reason}` verdict. The judge runs read-only
-   and cannot modify the workspace.
+4. **Codex judge.** `codex exec --json -s workspace-write --cd <workdir> --output-schema <schema>`
+   inspects the final workspace and returns a structured `{passed, reason}` verdict. It runs with
+   workspace-write so it can execute build/test success commands that write inside the temp workspace
+   (e.g. `cargo test`, which writes `target/`); it has no network or wider-system access.
 5. **RunRecord.** A pass/fail record is emitted with deterministic `(terminal_cause, causal_status,
    mechanism)` signatures (so clustering produces real failure patterns) plus reward and token-usage
    metadata.
