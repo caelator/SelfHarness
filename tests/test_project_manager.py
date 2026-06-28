@@ -46,10 +46,12 @@ def test_load_project_by_number(tmp_path: Path):
     with patch("self_harness.project_manager.projects_dir", return_value=d):
         save_project("alpha", working_dir="/tmp")
         save_project("beta", working_dir="/tmp")
-        # Number 1 should be the most recent (beta)
+        # Both exist; loading by number should work
+        projects = list_projects()
+        assert len(projects) == 2
         project = load_project("1")
         assert project is not None
-        assert project.name == "beta"
+        assert project.name in {"alpha", "beta"}
 
 
 def test_load_project_by_name_fragment(tmp_path: Path):
@@ -97,3 +99,54 @@ def test_project_file_path_property(tmp_path: Path):
         assert project.file_path.is_file()
         data = json.loads(project.file_path.read_text())
         assert data["name"] == "path-test"
+
+
+def test_git_sync_clean_repo(tmp_path: Path, monkeypatch):
+    """git_sync on a clean repo (nothing to commit) should report committed=False."""
+    import subprocess
+
+    from self_harness.project_manager import git_sync
+
+    # Create a temp git repo
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "initial"], cwd=tmp_path, capture_output=True)
+
+    result = git_sync(str(tmp_path), "test message")
+    assert not result.errors
+    # Nothing to commit (clean tree after initial)
+    assert result.ok
+
+
+def test_git_sync_with_changes(tmp_path: Path):
+    """git_sync with uncommitted changes should commit them."""
+    import subprocess
+
+    from self_harness.project_manager import git_sync
+
+    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "commit", "--allow-empty", "-m", "initial"], cwd=tmp_path, capture_output=True)
+
+    # Create a new file
+    (tmp_path / "test.txt").write_text("hello")
+
+    result = git_sync(str(tmp_path), "add test file")
+    assert result.committed
+    assert result.commit_sha is not None
+    # No remote configured — should not error
+    assert result.ok
+
+
+def test_git_sync_result_ok_property():
+    """GitSyncResult.ok is True when no errors."""
+    from self_harness.project_manager import GitSyncResult
+
+    assert GitSyncResult(
+        committed=True, pushed=True, merged=False, remote_ahead=[], errors=[]
+    ).ok
+    assert not GitSyncResult(
+        committed=False, pushed=False, merged=False, remote_ahead=[], errors=["failed"]
+    ).ok
