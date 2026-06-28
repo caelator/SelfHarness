@@ -275,3 +275,31 @@ def test_plain_renderer_streams_without_ansi(capsys) -> None:  # type: ignore[no
     out = capsys.readouterr().out
     assert "hello world" in out
     assert "\x1b[" not in out  # no ANSI escape codes in plain mode
+
+
+def test_renderer_does_not_duplicate_multistep_text(capsys) -> None:  # type: ignore[no-untyped-def]
+    # Regression: a multi-step turn (text, tool, more text) must render each chunk exactly once.
+    # The old renderer accumulated the whole turn in one Live(Markdown) buffer and re-emitted it on
+    # every refresh once it overflowed the viewport, producing repeated blocks.
+    from self_harness.cli_agent.ui import ConsoleRenderer
+
+    renderer = ConsoleRenderer(plain=True)
+    renderer.start_stream()
+    renderer.push_delta("FIRST STEP narration")
+    renderer.tool_event("bash", "$ cargo test", True)  # commits step 1
+    renderer.push_delta("SECOND STEP the final evaluation")
+    renderer.end_stream()  # commits step 2
+    out = capsys.readouterr().out
+    assert out.count("FIRST STEP narration") == 1
+    assert out.count("SECOND STEP the final evaluation") == 1
+
+
+def test_renderer_uses_fallback_text_when_no_deltas(capsys) -> None:  # type: ignore[no-untyped-def]
+    # A non-streaming transport yields final_text via end_stream(fallback_text=...) with no push_delta.
+    from self_harness.cli_agent.ui import ConsoleRenderer
+
+    renderer = ConsoleRenderer(plain=True)
+    renderer.start_stream()
+    renderer.end_stream(fallback_text="the whole answer", stop_reason="end_turn")
+    out = capsys.readouterr().out
+    assert out.count("the whole answer") == 1

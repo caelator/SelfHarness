@@ -129,7 +129,7 @@ def _run_turn(
         renderer.push_delta(delta)
 
     def _on_tool_event(name: str, summary: str, ok: bool) -> None:
-        # Tool activity interleaves with streamed text; rich's Live handles redraw cleanly.
+        # Each tool event commits the preceding text step, so streamed text and tool lines stay separated.
         renderer.tool_event(name, summary, ok)
 
     try:
