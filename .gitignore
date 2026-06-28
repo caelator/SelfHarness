@@ -9,3 +9,6 @@ runs/
 var/
 .env
 .env.*
+
+# Auto-promote source backups
+*.bak

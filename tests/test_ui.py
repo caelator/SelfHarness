@@ -308,7 +308,10 @@ def test_ui_promote_to_source_dry_run(tmp_path: Path) -> None:
     preview = app.promote_to_source(str(finished["run_id"]), {"apply": False})
     assert preview["applied"] is False
     assert preview["changed"] is True
-    assert "def initial_harness()" in preview["diff"]
+    # A real unified diff against harness.py is produced (the exact changed lines depend on whether the
+    # source already carries a promoted lineage, so assert on the diff header, not a specific code line).
+    assert "harness.py" in preview["diff"]
+    assert preview["diff"].lstrip().startswith("--- harness.py")
     # Dry-run must not modify the source file at all.
     assert harness_copy.read_text() == original_text
 

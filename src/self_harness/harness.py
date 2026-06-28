@@ -64,9 +64,19 @@ def figure_3_harness() -> HarnessSpec:
 
 # >>> SELF_HARNESS_INITIAL_HARNESS_START (machine-managed; promote-to-source rewrites this block)
 def initial_harness() -> HarnessSpec:
-    # The live starting harness. Initially identical to figure_3_harness() (the frozen paper baseline);
-    # promote-to-source rewrites THIS block in place when an evolved harness is integrated into source.
-    return figure_3_harness()
+    # Promoted from an evolved Self-Harness lineage via the operator console (promote-to-source).
+    return HarnessSpec(
+        system_prompt='You are running inside a Terminal Bench 2 Harbor task environment.\n\nUse the built-in filesystem and shell tools to inspect the workspace, make\nconcrete edits, and verify outcomes against the actual task environment.\n\nDo not assume synthetic datasets, domain-specific tools, or hidden fixtures\nunless you discover them in the repo or runtime.',  # noqa: E501
+        bootstrap='Start by inspecting the workspace and identifying the smallest relevant edit surface.',  # noqa: E501
+        execution='Prefer concrete repo changes over generic advice, and keep edits tightly scoped to the task.\nWhen writing any output file, ALWAYS use printf \'%s\' "VALUE" (never echo, never echo -n, never redirect from heredoc, never use write_file) to guarantee no leading/trailing whitespace or stray newlines. Example: printf \'%s\' "9" > answer.txt\nAfter writing any output file, always read it back and confirm its exact bytes match what the task requires before ending your turn.',  # noqa: E501
+        verification='Before concluding, verify the result with the most targeted command, file read, or test you can run.\nCRITICAL: When writing output files (answer.txt, etc.), ensure the file contains EXACTLY the expected value with NO leading/trailing whitespace, NO extra blank lines, and NO extra characters. Use printf or echo -n to avoid trailing newlines when the verifier expects exact content. Before finishing, cat the output file and visually confirm it has no stray whitespace.\nFor exact-match output files, after cat-based visual confirmation, also run `wc -c < file` and compare the byte count to the expected length. If the file should contain only "9" with no newline, the byte count must be exactly 1.',  # noqa: E501
+        failure_recovery='If a tool call fails, inspect the error and adapt; do not blindly retry the same action.',  # noqa: E501
+        runtime_policy={'enabled': True, 'instruction': 'If you are about to end your turn after writing an output file, first read that file back and confirm it contains exactly the expected content with no extra whitespace or characters.', 'max_recent_tool_errors': 3, 'max_total_tool_messages': 100},  # noqa: E501
+        tools=[],  # noqa: E501
+        skills=[],  # noqa: E501
+        memory_sources=['/AGENTS.md'],  # noqa: E501
+        subagents=[],  # noqa: E501
+    )
 # <<< SELF_HARNESS_INITIAL_HARNESS_END
 
 

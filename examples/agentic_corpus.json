@@ -1,67 +1,18 @@
 {
   "corpus_version": "1",
-  "corpus_id": "agentic-coding-mixed",
+  "corpus_id": "agentic-coding-broad",
   "tasks": [
-    {
-      "id": "fizzbuzz-script",
-      "split": "held_in",
-      "failure_mode": "agentic_coding",
-      "description": "Implement FizzBuzz as a runnable Python script.",
-      "metadata": {
-        "instructions": "Create a file named fizzbuzz.py in the current directory. Running `python3 fizzbuzz.py` must print the numbers 1 through 15, one per line, but print 'Fizz' for multiples of 3, 'Buzz' for multiples of 5, and 'FizzBuzz' for multiples of 15.",
-        "success_criteria": "fizzbuzz.py exists and `python3 fizzbuzz.py` prints exactly: 1, 2, Fizz, 4, Buzz, Fizz, 7, 8, Fizz, Buzz, 11, Fizz, 13, 14, FizzBuzz (each on its own line)."
-      }
-    },
-    {
-      "id": "word-count-answer",
-      "split": "held_in",
-      "failure_mode": "agentic_coding",
-      "description": "Count words in a provided text file and write the count to answer.txt.",
-      "metadata": {
-        "instructions": "The file input.txt in the current directory contains some text. Count the total number of whitespace-separated words in it and write ONLY that integer (no other text) to a new file named answer.txt.",
-        "success_criteria": "answer.txt exists and contains exactly the integer word count of input.txt (whitespace-separated tokens) and nothing else.",
-        "workspace_files": {
-          "input.txt": "the quick brown fox jumps over the lazy dog\n"
-        }
-      }
-    },
     {
       "id": "fix-syntax-error",
       "split": "held_in",
       "failure_mode": "agentic_coding",
-      "description": "Fix a Python script that has a bug so its test passes.",
+      "description": "Fix a buggy add() so its test passes.",
       "metadata": {
-        "instructions": "The file calc.py defines a function add(a, b) that is supposed to return the sum of a and b, but it is buggy. Fix calc.py so that `python3 test_calc.py` exits successfully and prints 'ok'.",
-        "success_criteria": "Running `python3 test_calc.py` exits with code 0 and prints 'ok'; calc.py's add function returns a + b.",
+        "instructions": "calc.py defines add(a, b) but it is buggy. Fix calc.py so `python3 test_calc.py` exits 0 and prints 'ok'.",
+        "success_criteria": "Running `python3 test_calc.py` exits 0 and prints 'ok'.",
         "workspace_files": {
           "calc.py": "def add(a, b):\n    return a - b\n",
-          "test_calc.py": "from calc import add\nassert add(2, 3) == 5, 'add is broken'\nassert add(10, 5) == 15\nprint('ok')\n"
-        }
-      }
-    },
-    {
-      "id": "csv-column-sum",
-      "split": "held_in",
-      "failure_mode": "agentic_coding",
-      "description": "Sum a numeric column in a CSV that has a header row, ignoring blank lines.",
-      "metadata": {
-        "instructions": "The file data.csv in the current directory has a header row `name,amount` followed by data rows. Some rows may be blank. Compute the SUM of the integer values in the `amount` column (the header row is NOT data and must be skipped) and write ONLY that integer to a file named sum.txt with no other characters.",
-        "success_criteria": "sum.txt exists and contains exactly the integer 60 (the sum of the amount column: 10 + 25 + 25), with no header text, no label, and no extra whitespace beyond an optional single trailing newline.",
-        "workspace_files": {
-          "data.csv": "name,amount\nalice,10\nbob,25\n\ncarol,25\n"
-        }
-      }
-    },
-    {
-      "id": "unique-sorted-words",
-      "split": "held_in",
-      "failure_mode": "agentic_coding",
-      "description": "Produce the case-insensitive unique words from a file, lowercased and sorted.",
-      "metadata": {
-        "instructions": "The file words.txt contains one or more whitespace-separated words, with duplicates and mixed capitalization. Write a file named unique.txt containing each distinct word exactly once, compared case-insensitively, output in lowercase, sorted in ascending alphabetical order, one word per line. Do not include duplicate lines and do not include a leading or trailing blank line.",
-        "success_criteria": "unique.txt contains exactly these lines in this order: apple, banana, cherry (each lowercase, one per line, alphabetically sorted, no duplicates, no extra blank lines).",
-        "workspace_files": {
-          "words.txt": "Banana apple CHERRY banana Apple cherry APPLE\n"
+          "test_calc.py": "from calc import add\nassert add(2,3)==5\nassert add(10,5)==15\nprint('ok')\n"
         }
       }
     },
@@ -69,13 +20,330 @@
       "id": "divide-edge-case",
       "split": "held_in",
       "failure_mode": "agentic_coding",
-      "description": "Fix a divide function to handle the division-by-zero edge case its tests require.",
+      "description": "Handle divide-by-zero by returning 'undefined'.",
       "metadata": {
-        "instructions": "The file mathops.py defines divide(a, b). It must return a / b as a float, EXCEPT when b == 0, in which case it must return the string 'undefined' instead of raising. The current implementation crashes when b is 0. Fix mathops.py so that `python3 test_mathops.py` exits 0 and prints 'ok'. Run the test yourself to confirm before finishing.",
-        "success_criteria": "Running `python3 test_mathops.py` exits with code 0 and prints 'ok'; divide returns a / b normally and returns the string 'undefined' when b == 0.",
+        "instructions": "mathops.py defines divide(a,b); it must return a/b as float but return 'undefined' when b==0 instead of raising. Fix it so `python3 test_mathops.py` prints 'ok' and exits 0.",
+        "success_criteria": "`python3 test_mathops.py` exits 0 and prints 'ok'.",
         "workspace_files": {
           "mathops.py": "def divide(a, b):\n    return a / b\n",
-          "test_mathops.py": "from mathops import divide\nassert divide(10, 2) == 5.0\nassert divide(9, 3) == 3.0\nassert divide(1, 0) == 'undefined', 'must handle divide-by-zero'\nprint('ok')\n"
+          "test_mathops.py": "from mathops import divide\nassert divide(10,2)==5.0\nassert divide(1,0)=='undefined'\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "mutable-default-arg",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Fix the classic mutable-default-argument bug.",
+      "metadata": {
+        "instructions": "acc.py defines append_item(item, bucket=[]) intended to start a fresh list each call when no bucket is given, but it accidentally shares state across calls. Fix acc.py so `python3 test_acc.py` exits 0 and prints 'ok'.",
+        "success_criteria": "`python3 test_acc.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "acc.py": "def append_item(item, bucket=[]):\n    bucket.append(item)\n    return bucket\n",
+          "test_acc.py": "from acc import append_item\nassert append_item(1)==[1]\nassert append_item(2)==[2], 'state leaked between calls'\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "off-by-one-sum",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Fix an off-by-one range so it sums 1..n inclusive.",
+      "metadata": {
+        "instructions": "sumn.py defines sum_to(n) meant to return 1+2+...+n inclusive, but it is off by one. Fix it so `python3 test_sumn.py` exits 0 and prints 'ok'.",
+        "success_criteria": "`python3 test_sumn.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "sumn.py": "def sum_to(n):\n    return sum(range(1, n))\n",
+          "test_sumn.py": "from sumn import sum_to\nassert sum_to(5)==15\nassert sum_to(1)==1\nassert sum_to(100)==5050\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "binary-search",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Implement binary search returning index or -1.",
+      "metadata": {
+        "instructions": "Create search.py with bsearch(arr, target) that returns the index of target in the sorted list arr, or -1 if absent. Make `python3 test_search.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_search.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_search.py": "from search import bsearch\nassert bsearch([1,3,5,7,9],7)==3\nassert bsearch([1,3,5,7,9],2)==-1\nassert bsearch([],1)==-1\nassert bsearch([4],4)==0\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "merge-sorted",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Merge two sorted lists into one sorted list.",
+      "metadata": {
+        "instructions": "Create merge.py with merge(a, b) that merges two ascending-sorted lists into a single ascending-sorted list. Make `python3 test_merge.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_merge.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_merge.py": "from merge import merge\nassert merge([1,3,5],[2,4,6])==[1,2,3,4,5,6]\nassert merge([],[1])==[1]\nassert merge([1,1],[1])==[1,1,1]\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "group-anagrams",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Group words that are anagrams of each other.",
+      "metadata": {
+        "instructions": "Create anagram.py with group(words) that returns a list of groups; each group is a list of words that are anagrams of each other. Groups and words within them must be sorted ascending, and the list of groups sorted by their first word. Make `python3 test_anagram.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_anagram.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_anagram.py": "from anagram import group\nassert group(['eat','tea','tan','ate','nat','bat'])==[['ate','eat','tea'],['bat'],['nat','tan']]\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "flatten-nested",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Flatten an arbitrarily nested list of integers.",
+      "metadata": {
+        "instructions": "Create flat.py with flatten(x) that returns a flat list of all integers in the arbitrarily nested list x, left to right. Make `python3 test_flat.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_flat.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_flat.py": "from flat import flatten\nassert flatten([1,[2,[3,4],5],[6]])==[1,2,3,4,5,6]\nassert flatten([])==[]\nassert flatten([[[[7]]]])==[7]\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "top-k-words",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Return the k most common words using collections.",
+      "metadata": {
+        "instructions": "Create freq.py with top_k(text, k) returning the k most frequent whitespace-separated words in text as a list of (word, count) tuples, ordered by count descending then word ascending. Make `python3 test_freq.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_freq.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_freq.py": "from freq import top_k\nassert top_k('a b a c b a', 2)==[('a',3),('b',2)]\nassert top_k('x y z', 2)==[('x',1),('y',1)]\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "roman-to-int",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Parse a Roman numeral string to an integer.",
+      "metadata": {
+        "instructions": "Create r2i.py with to_int(s) that converts a valid Roman numeral string (I,V,X,L,C,D,M with subtractive notation) to its integer value. Make `python3 test_r2i.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_r2i.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_r2i.py": "from r2i import to_int\nassert to_int('IV')==4\nassert to_int('XLIX')==49\nassert to_int('MMXXIV')==2024\nassert to_int('III')==3\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "retry-decorator",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Implement a retry decorator that retries on exception.",
+      "metadata": {
+        "instructions": "Create retry.py with a decorator retry(times) that calls the wrapped function again (up to `times` total attempts) if it raises, returning the first successful result, and re-raising if all attempts fail. Make `python3 test_retry.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_retry.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_retry.py": "from retry import retry\ncalls={'n':0}\n@retry(3)\ndef flaky():\n    calls['n']+=1\n    if calls['n']<3: raise ValueError('boom')\n    return 'done'\nassert flaky()=='done'\nassert calls['n']==3\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "custom-exception",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Raise a custom exception for invalid input.",
+      "metadata": {
+        "instructions": "Create validate.py defining a class NegativeError(Exception) and a function check(n) that returns n if n>=0 but raises NegativeError if n<0. Make `python3 test_validate.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_validate.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_validate.py": "from validate import check, NegativeError\nassert check(5)==5\ntry:\n    check(-1); assert False\nexcept NegativeError:\n    pass\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "json-roundtrip",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Read JSON, increment a field, write it back.",
+      "metadata": {
+        "instructions": "config.json contains a JSON object with an integer field 'count'. Create bump.py so that running `python3 bump.py` increments config.json's 'count' by 1 in place (preserving other fields). Make `python3 test_bump.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_bump.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "config.json": "{\"count\": 4, \"name\": \"x\"}\n",
+          "test_bump.py": "import json, subprocess\nsubprocess.run(['python3','bump.py'], check=True)\nd=json.load(open('config.json'))\nassert d['count']==5, d\nassert d['name']=='x'\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "regex-extract-emails",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Extract all email addresses from text via regex.",
+      "metadata": {
+        "instructions": "Create emails.py with extract(text) returning a list of all email addresses in text, in order of appearance. An email is word characters/dots, an @, a domain, and a dot-suffix. Make `python3 test_emails.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_emails.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_emails.py": "from emails import extract\nassert extract('ping a@b.com and c.d@e.org!')==['a@b.com','c.d@e.org']\nassert extract('none here')==[]\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "run-length",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Implement run-length encode and decode round-trip.",
+      "metadata": {
+        "instructions": "Create rle.py with encode(s) and decode(s). encode('aaabb')=='a3b2'; decode must invert encode for any lowercase string. Make `python3 test_rle.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_rle.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_rle.py": "from rle import encode, decode\nassert encode('aaabb')=='a3b2'\nassert encode('')==''\nassert decode('a3b2')=='aaabb'\nfor s in ['abc','zzz','hello']:\n    assert decode(encode(s))==s\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "multi-file-import",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Refactor a helper into its own module and import it.",
+      "metadata": {
+        "instructions": "main.py has an inline helper but test_main.py expects greet() to be importable from a module named greetings.py (i.e. `from greetings import greet`). Create greetings.py with greet(name)->'Hello, NAME!' and make `python3 test_main.py` exit 0 and print 'ok'. Do not modify test_main.py.",
+        "success_criteria": "`python3 test_main.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "main.py": "def greet(name):\n    return 'Hi ' + name\n",
+          "test_main.py": "from greetings import greet\nassert greet('Ada')=='Hello, Ada!'\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "memoize-fib",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Make a recursive Fibonacci correct and fast via memoization.",
+      "metadata": {
+        "instructions": "fib.py defines fib(n) recursively but it is both buggy at the base case and exponentially slow. Fix it so fib(0)=0, fib(1)=1, fib(n)=fib(n-1)+fib(n-2), and fib(35) returns quickly. Make `python3 test_fib.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_fib.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "fib.py": "def fib(n):\n    if n<=1: return 1\n    return fib(n-1)+fib(n-2)\n",
+          "test_fib.py": "from fib import fib\nassert fib(0)==0\nassert fib(1)==1\nassert fib(10)==55\nassert fib(35)==9227465\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "two-sum",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Return indices of two numbers that add to a target.",
+      "metadata": {
+        "instructions": "Create twosum.py with two_sum(nums, target) returning a tuple of the two indices (i<j) whose values sum to target; assume exactly one solution exists. Make `python3 test_twosum.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_twosum.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_twosum.py": "from twosum import two_sum\nassert two_sum([2,7,11,15],9)==(0,1)\nassert two_sum([3,2,4],6)==(1,2)\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "word-count-answer",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Count words and write only the integer to answer.txt.",
+      "metadata": {
+        "instructions": "input.txt contains text. Count whitespace-separated words and write ONLY that integer (nothing else) to answer.txt.",
+        "success_criteria": "answer.txt contains exactly the integer word count of input.txt and nothing else (an optional single trailing newline is fine).",
+        "workspace_files": {
+          "input.txt": "the quick brown fox jumps over the lazy dog\n"
+        }
+      }
+    },
+    {
+      "id": "csv-column-sum",
+      "split": "held_in",
+      "failure_mode": "agentic_coding",
+      "description": "Sum a CSV column, skipping the header and blank lines.",
+      "metadata": {
+        "instructions": "data.csv has header `name,amount` then rows (some blank). Sum the integers in the amount column and write ONLY that integer to sum.txt.",
+        "success_criteria": "sum.txt contains exactly 60 (10+25+25) with no other characters beyond an optional trailing newline.",
+        "workspace_files": {
+          "data.csv": "name,amount\nalice,10\nbob,25\n\ncarol,25\n"
+        }
+      }
+    },
+    {
+      "id": "stack-class",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Implement a Stack class with push/pop/peek/is_empty.",
+      "metadata": {
+        "instructions": "Create stack.py with a class Stack supporting push(x), pop()->x, peek()->x, and is_empty()->bool (LIFO). pop/peek on empty must raise IndexError. Make `python3 test_stack.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_stack.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_stack.py": "from stack import Stack\ns=Stack()\nassert s.is_empty()\ns.push(1); s.push(2)\nassert s.peek()==2\nassert s.pop()==2\nassert s.pop()==1\nassert s.is_empty()\ntry:\n    s.pop(); assert False\nexcept IndexError: pass\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "lcs-length",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Compute the longest common subsequence length.",
+      "metadata": {
+        "instructions": "Create lcs.py with lcs(a, b) returning the length of the longest common subsequence of strings a and b. Make `python3 test_lcs.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_lcs.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_lcs.py": "from lcs import lcs\nassert lcs('abcde','ace')==3\nassert lcs('abc','abc')==3\nassert lcs('abc','def')==0\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "parse-ini",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Parse a simple key=value config into a dict.",
+      "metadata": {
+        "instructions": "Create ini.py with parse(text) returning a dict of key->value from lines of the form key=value. Ignore blank lines and lines starting with '#'. Strip surrounding whitespace from keys and values. Make `python3 test_ini.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_ini.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_ini.py": "from ini import parse\nassert parse('a=1\\n# c\\n\\nb = two ')=={'a':'1','b':'two'}\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "caesar-cipher",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Implement a Caesar shift cipher for lowercase letters.",
+      "metadata": {
+        "instructions": "Create caesar.py with shift(text, n) that shifts each lowercase a-z letter forward by n (wrapping), leaving other characters unchanged. Make `python3 test_caesar.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_caesar.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_caesar.py": "from caesar import shift\nassert shift('abc',1)=='bcd'\nassert shift('xyz',3)=='abc'\nassert shift('a b!',1)=='b c!'\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "matrix-transpose",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Transpose a rectangular matrix.",
+      "metadata": {
+        "instructions": "Create mt.py with transpose(m) returning the transpose of the rectangular 2D list m (rows become columns). Make `python3 test_mt.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_mt.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_mt.py": "from mt import transpose\nassert transpose([[1,2,3],[4,5,6]])==[[1,4],[2,5],[3,6]]\nassert transpose([[1]])==[[1]]\nprint('ok')\n"
+        }
+      }
+    },
+    {
+      "id": "dedup-order",
+      "split": "held_out",
+      "failure_mode": "agentic_coding",
+      "description": "Remove duplicates while preserving first-seen order.",
+      "metadata": {
+        "instructions": "Create dedup.py with dedup(xs) returning xs with duplicates removed, preserving the order of first appearance. Make `python3 test_dedup.py` exit 0 and print 'ok'.",
+        "success_criteria": "`python3 test_dedup.py` exits 0 and prints 'ok'.",
+        "workspace_files": {
+          "test_dedup.py": "from dedup import dedup\nassert dedup([3,1,3,2,1])==[3,1,2]\nassert dedup([])==[]\nprint('ok')\n"
         }
       }
     },
@@ -83,10 +351,10 @@
       "id": "json-extract",
       "split": "held_out",
       "failure_mode": "agentic_coding",
-      "description": "Extract a value from a JSON file and write it to a result file.",
+      "description": "Extract a JSON field's value to result.txt.",
       "metadata": {
-        "instructions": "The file data.json contains a JSON object with a 'name' field. Write the value of that 'name' field (the string only) to a file named result.txt.",
-        "success_criteria": "result.txt exists and contains exactly the string value of the 'name' field in data.json with no quotes or extra whitespace.",
+        "instructions": "data.json contains an object with a 'name' field. Write the value of that 'name' field (the string only) to result.txt.",
+        "success_criteria": "result.txt contains exactly the string value of the 'name' field in data.json with no quotes or extra whitespace beyond an optional trailing newline.",
         "workspace_files": {
           "data.json": "{\"name\": \"selfharness\", \"version\": 2}\n"
         }
@@ -98,33 +366,10 @@
       "failure_mode": "agentic_coding",
       "description": "Reverse the order of lines in a file.",
       "metadata": {
-        "instructions": "The file lines.txt contains several lines of text. Create a file named reversed.txt that contains the same lines in reverse order (last line first).",
-        "success_criteria": "reversed.txt exists and contains the lines of lines.txt in reverse order.",
+        "instructions": "lines.txt contains several lines. Create reversed.txt with the same lines in reverse order (last line first).",
+        "success_criteria": "reversed.txt contains the lines of lines.txt in reverse order.",
         "workspace_files": {
           "lines.txt": "alpha\nbeta\ngamma\n"
-        }
-      }
-    },
-    {
-      "id": "int-to-roman",
-      "split": "held_out",
-      "failure_mode": "agentic_coding",
-      "description": "Convert an integer argument to a Roman numeral, including subtractive cases.",
-      "metadata": {
-        "instructions": "Create roman.py so that `python3 roman.py N` prints the Roman numeral for the positive integer N (1..3999) followed by a newline. You must handle subtractive notation correctly (e.g. 4=IV, 9=IX, 40=XL, 90=XC, 49=XLIX).",
-        "success_criteria": "`python3 roman.py 49` prints exactly `XLIX`, `python3 roman.py 4` prints `IV`, and `python3 roman.py 2024` prints `MMXXIV`, each on its own line."
-      }
-    },
-    {
-      "id": "balanced-brackets",
-      "split": "held_out",
-      "failure_mode": "agentic_coding",
-      "description": "Decide whether the brackets in a string are correctly balanced and nested.",
-      "metadata": {
-        "instructions": "The file expr.txt contains a single line with brackets of three kinds: (), [], {}. Create a file named result.txt containing exactly `balanced` if every opening bracket has a matching closing bracket of the same kind in the correct nested order, or `unbalanced` otherwise. Non-bracket characters must be ignored.",
-        "success_criteria": "result.txt contains exactly the single word `balanced` (the input '([a]{b})' is correctly balanced and nested), with no extra characters beyond an optional trailing newline.",
-        "workspace_files": {
-          "expr.txt": "([a]{b})\n"
         }
       }
     }
