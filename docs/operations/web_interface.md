@@ -39,6 +39,26 @@ The console has three top-level views — **Runs**, **Dev task**, and **Chat**:
      last outcome; *Stop* halts gracefully after the current run finishes. Backed by
      `POST /api/autoloop/start` and `POST /api/autoloop/stop`; status is in
      `GET /api/state` under `autoloop`.
+   - **Feeding the loop failures** — the loop only learns when it sees a *held-in
+     failure*, so two sources continuously supply novel ones (both add **held-in**
+     tasks; the static corpus's held-out stays a fixed regression yardstick):
+     - **Failure inbox** — drop a *failing-test bundle* `{id, command, files?}` via
+       the console form or `POST /api/inbox`, or write a JSON file into
+       `<runs-dir>/inbox/`. Each becomes a held-in task ("make `command` exit 0").
+       The loop drains the inbox each iteration (bundles are moved to
+       `inbox/processed/`, never deleted) and accumulates tasks in
+       `<runs-dir>/learned_tasks.json` (persists across sessions). This is the
+       primitive for pointing the methodology at *your own* software: feed it the
+       failures that actually occur.
+     - **Adversarial generation** — when the inbox is empty *and* the last run
+       changed nothing (the loop is starved), GLM 5.2 generates new candidate
+       held-in tasks. Off-switch: `--no-task-generation`. An optional solve+verify
+       guard (`--generation-guard`) quarantines tasks a fresh agent can't solve
+       before they enter the corpus; it's **off by default** because new tasks are
+       held-in only and the fixed held-out gate already rejects any edit that
+       regresses real performance.
+     The console shows `inbox: N pending`, `learned: M tasks`, generated-this-session
+     count, and the per-iteration source (inbox / generated / base).
 2. **Overview** — final held-in/held-out pass rates, accept/reject counts, GLM
    token usage.
 3. **Trajectory** — per-round step view with deltas and accept/merge/carry badges.
@@ -102,6 +122,7 @@ POST /api/chat                        single-shot GLM 5.2 chat with history
 POST /api/harness/reset               discard the evolving harness lineage
 POST /api/autoloop/start              start the continuous self-improvement loop (evolving runs back-to-back)
 POST /api/autoloop/stop               stop the loop gracefully after the current run
+POST /api/inbox                       submit a failing-test bundle {id, command, files?} to feed the loop
 POST /api/runs/<id>/promote-to-source render/diff (and apply by default; pass {"apply": false} for a preview)
 ```
 

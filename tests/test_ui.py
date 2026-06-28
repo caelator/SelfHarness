@@ -206,6 +206,64 @@ def test_ui_stop_autoloop_when_not_running_is_safe(tmp_path: Path) -> None:
     assert app.state()["autoloop"]["active"] is False
 
 
+def test_ui_inbox_submit_and_drain_into_learned_tasks(tmp_path: Path) -> None:
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    # Submitting a failing-test bundle lands in the inbox and shows up in state.
+    res = app.submit_inbox_bundle({"id": "fix-thing", "command": "python3 t.py", "files": {"t.py": "assert False\n"}})
+    assert res["ok"] is True
+    assert app.state()["inbox_depth"] == 1
+    assert app.state()["learned_task_count"] == 0
+
+    # Draining converts the bundle into a held-in learned task and clears the inbox.
+    ingested = app._drain_inbox()
+    assert ingested == 1
+    assert app.state()["inbox_depth"] == 0
+    assert app.state()["learned_task_count"] == 1
+    learned = app._load_learned_tasks()
+    assert learned[0]["id"] == "fix-thing"
+    assert learned[0]["split"] == "held_in"
+    # Processed bundle is preserved (audit trail), not deleted.
+    assert (app.inbox_processed_dir / list(app.inbox_processed_dir.iterdir())[0].name).is_file()
+
+
+def test_ui_submit_inbox_rejects_malformed_bundle(tmp_path: Path) -> None:
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    with pytest.raises(ValueError):
+        app.submit_inbox_bundle({"command": "no id"})
+
+
+def test_ui_assembled_corpus_has_base_held_out_plus_learned_held_in(tmp_path: Path) -> None:
+    import json
+    import shutil
+
+    # Give the app a real base corpus to assemble against.
+    repo = Path(__file__).resolve().parents[1]
+    (tmp_path / "examples").mkdir(parents=True)
+    shutil.copy2(repo / "examples" / "agentic_corpus.json", tmp_path / "examples" / "agentic_corpus.json")
+
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    app.submit_inbox_bundle({"id": "learned-1", "command": "python3 t.py", "files": {"t.py": "assert False\n"}})
+    app._drain_inbox()
+
+    out_dir = app.runs_dir / "probe"
+    corpus_path = app._assemble_iteration_corpus(out_dir)
+    assert corpus_path is not None and corpus_path.is_file()
+    corpus = json.loads(corpus_path.read_text())
+    by_id = {t["id"]: t for t in corpus["tasks"]}
+    # The learned task is present as held_in.
+    assert by_id["learned-1"]["split"] == "held_in"
+    # The base corpus's held_out tasks are still held_out (fixed yardstick), proving they're preserved.
+    base = json.loads((tmp_path / "examples" / "agentic_corpus.json").read_text())
+    base_held_out = {t["id"] for t in base["tasks"] if t["split"] == "held_out"}
+    for tid in base_held_out:
+        assert by_id[tid]["split"] == "held_out"
+
+
+def test_ui_assemble_corpus_returns_none_without_learned_tasks(tmp_path: Path) -> None:
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    assert app._assemble_iteration_corpus(app.runs_dir / "probe") is None
+
+
 def test_ui_run_can_opt_out_of_evolution(tmp_path: Path) -> None:
     app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
     job = app.start_run({"rounds": 1, "evaluation_repeats": 1, "seed": 0, "evolve": False})

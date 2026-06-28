@@ -210,6 +210,20 @@ def main(argv: list[str] | None = None) -> int:
         help="do not auto-integrate reviewer-approved edits into harness.py (preview only via the API)",
     )
     ui_parser.set_defaults(auto_promote_to_source=True)
+    ui_parser.add_argument(
+        "--no-task-generation",
+        dest="task_generation",
+        action="store_false",
+        help="disable adversarial task generation when the continuous loop is starved of real failures",
+    )
+    ui_parser.set_defaults(task_generation=True)
+    ui_parser.add_argument(
+        "--generation-guard",
+        dest="generation_guard",
+        action="store_true",
+        help="quarantine generated tasks behind a solve+verify check before they enter the corpus",
+    )
+    ui_parser.set_defaults(generation_guard=False)
 
     model_preflight_parser = subparsers.add_parser(
         "model-preflight",
@@ -887,6 +901,8 @@ def main(argv: list[str] | None = None) -> int:
             tool_timeout_seconds=args.tool_timeout_seconds,
             codex_binary=args.codex_binary,
             auto_promote_to_source=args.auto_promote_to_source,
+            task_generation=args.task_generation,
+            generation_guard=args.generation_guard,
         )
     if args.command == "model-preflight":
         return _run_model_preflight(

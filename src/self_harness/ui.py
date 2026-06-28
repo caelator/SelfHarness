@@ -106,6 +106,9 @@ class HarnessUiApp:
         tool_timeout_seconds: int = 30,
         codex_binary: str = "codex",
         auto_promote_to_source: bool = True,
+        task_generation: bool = True,
+        generation_guard: bool = False,
+        generation_batch: int = 3,
     ) -> None:
         self.root = root.resolve()
         self.runs_dir = _resolve_child(self.root, runs_dir)
@@ -142,6 +145,17 @@ class HarnessUiApp:
         }
         self._autoloop_thread: threading.Thread | None = None
         self._autoloop_stop = threading.Event()
+        # Continuous failure sourcing for the loop. New tasks are always held-in; the static corpus's
+        # held-out stays a fixed regression yardstick. Real failures arrive as bundles dropped in the
+        # inbox; accumulated learned tasks persist across sessions in learned_tasks.json.
+        self.task_generation = task_generation
+        self.generation_guard = generation_guard
+        self.generation_batch = generation_batch
+        self.inbox_dir = self.runs_dir / "inbox"
+        self.inbox_processed_dir = self.inbox_dir / "processed"
+        self.learned_tasks_path = self.runs_dir / "learned_tasks.json"
+        self.inbox_dir.mkdir(parents=True, exist_ok=True)
+        self._autoloop.update(inbox_ingested=0, tasks_generated=0, learned_task_count=0, last_source=None)
 
     def state(self) -> dict[str, Any]:
         with self._lock:
@@ -158,6 +172,8 @@ class HarnessUiApp:
             "harness_state": self._harness_state_status(),
             "auto_promote_to_source": self.auto_promote_to_source,
             "autoloop": dict(self._autoloop),
+            "inbox_depth": self._inbox_depth(),
+            "learned_task_count": len(self._load_learned_tasks()),
             "reproduction_claimed": False,
         }
 
@@ -459,6 +475,206 @@ class HarnessUiApp:
         )
         return job, evolve
 
+    # ---- Continuous failure sourcing (inbox ingestion + adversarial generation) ----------------------
+
+    def _inbox_depth(self) -> int:
+        if not self.inbox_dir.is_dir():
+            return 0
+        return sum(1 for p in self.inbox_dir.glob("*.json") if p.is_file())
+
+    def _load_learned_tasks(self) -> list[dict[str, Any]]:
+        """Load the accumulated held-in tasks (ingested + accepted-generated). Tolerant of a missing file."""
+
+        if not self.learned_tasks_path.is_file():
+            return []
+        try:
+            value = json.loads(self.learned_tasks_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        tasks = value.get("tasks") if isinstance(value, dict) else None
+        return [t for t in tasks if isinstance(t, dict)] if isinstance(tasks, list) else []
+
+    def _save_learned_tasks(self, tasks: list[dict[str, Any]]) -> None:
+        from self_harness.task_sources import dedupe_tasks
+
+        payload = {"schema_version": UI_SCHEMA_VERSION, "updated_at": _now(), "tasks": dedupe_tasks(tasks)}
+        write_stable_json(self.learned_tasks_path, payload)
+
+    def _drain_inbox(self) -> int:
+        """Convert each inbox failing-test bundle into a held-in task, then move it to processed/.
+
+        Bundles are never deleted — they're moved to inbox/processed/ for an audit trail. A malformed
+        bundle is moved to processed/ with a .rejected suffix so it doesn't block the queue forever.
+        Returns the number of tasks newly ingested.
+        """
+
+        from self_harness.task_sources import TaskSourceError, ingest_failing_bundle
+
+        if not self.inbox_dir.is_dir():
+            return 0
+        bundles = sorted(p for p in self.inbox_dir.glob("*.json") if p.is_file())
+        if not bundles:
+            return 0
+        self.inbox_processed_dir.mkdir(parents=True, exist_ok=True)
+        learned = self._load_learned_tasks()
+        ingested = 0
+        for bundle_path in bundles:
+            try:
+                bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+                task = ingest_failing_bundle(bundle)
+            except (OSError, json.JSONDecodeError, TaskSourceError) as exc:
+                _log(f"inbox: rejected {bundle_path.name}: {exc}")
+                bundle_path.rename(self.inbox_processed_dir / (bundle_path.name + ".rejected"))
+                continue
+            learned.append(task)
+            ingested += 1
+            _log(f"inbox: ingested failing bundle '{task['id']}' as a held-in task")
+            bundle_path.rename(self.inbox_processed_dir / bundle_path.name)
+        if ingested:
+            self._save_learned_tasks(learned)
+        return ingested
+
+    def submit_inbox_bundle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate and persist a failing-test bundle to the inbox (consumed on the next loop iteration)."""
+
+        from self_harness.task_sources import TaskSourceError, ingest_failing_bundle
+
+        try:
+            ingest_failing_bundle(payload)  # validate up front; raises on bad shape
+        except TaskSourceError as exc:
+            raise ValueError(str(exc)) from exc
+        bundle_id = str(payload["id"])
+        safe = "".join(ch for ch in bundle_id if ch.isalnum() or ch in {"-", "_"}) or "bundle"
+        self.inbox_dir.mkdir(parents=True, exist_ok=True)
+        target = self.inbox_dir / f"{_now().replace(':', '').replace('.', '')}-{safe}.json"
+        write_stable_json(target, dict(payload))
+        return {"schema_version": UI_SCHEMA_VERSION, "ok": True, "id": bundle_id, "inbox_depth": self._inbox_depth()}
+
+    def _assemble_iteration_corpus(self, out_dir: Path) -> Path | None:
+        """Build the effective corpus for one iteration: static base (held-out yardstick) + learned held-in.
+
+        Writes it inside the run dir (effective_corpus.json) so the exact task set is audited. Returns the
+        path, or None when there are no learned tasks (use the static corpus directly).
+        """
+
+        from self_harness.task_sources import assemble_corpus
+
+        learned = self._load_learned_tasks()
+        if not learned:
+            return None
+        base_path = self._default_agentic_corpus()
+        base = json.loads(base_path.read_text(encoding="utf-8"))
+        corpus = assemble_corpus(base, learned)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        target = out_dir / "effective_corpus.json"
+        write_stable_json(target, corpus)
+        return target
+
+    def _maybe_generate_tasks(self, last_outcome: str | None) -> int:
+        """When starved (no pending inbox and the last run changed nothing), ask GLM for new held-in tasks.
+
+        Generated tasks are namespaced and (optionally, when generation_guard is on) solve+verified before
+        being persisted. Returns the number added. Network/parse failures are swallowed — generation is a
+        best-effort top-up, never a hard dependency of the loop.
+        """
+
+        if not self.task_generation:
+            return 0
+        if self._inbox_depth() > 0 or last_outcome not in {None, "no change"}:
+            return 0
+        try:
+            from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
+            from self_harness.task_sources import (
+                filter_verified_tasks,
+                generation_prompts,
+                parse_generated_tasks,
+            )
+
+            api_key = resolve_zai_api_key()
+            base_url = resolve_zai_base_url()
+            system, user = generation_prompts(self._weak_spot_summaries(), batch=self.generation_batch)
+            text = self._glm_complete(system, user, api_key=api_key, base_url=base_url, max_tokens=2048)
+            tasks = parse_generated_tasks(text, id_prefix=f"gen-{_now().replace(':', '').replace('.', '')}")
+            guard = self._build_task_verifier(api_key, base_url) if self.generation_guard else None
+            tasks = filter_verified_tasks(tasks, guard)
+            if not tasks:
+                return 0
+            learned = self._load_learned_tasks()
+            learned.extend(tasks)
+            self._save_learned_tasks(learned)
+            _log(f"generator: added {len(tasks)} new held-in task(s) (loop was starved)")
+            return len(tasks)
+        except Exception as exc:  # noqa: BLE001 - generation is best-effort; never break the loop.
+            _log(f"generator: skipped ({exc})")
+            return 0
+
+    def _weak_spot_summaries(self) -> list[str]:
+        """Short human-readable hints about recent failure areas, to steer task generation."""
+
+        learned = self._load_learned_tasks()
+        hints = [str(t.get("description", "")) for t in learned[-5:] if t.get("description")]
+        return hints
+
+    def _glm_complete(self, system: str, user: str, *, api_key: str, base_url: str, max_tokens: int) -> str:
+        from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
+        from self_harness.adapters.llm.paper_models import GLMClient
+        from self_harness.model_backend_preflight import build_zai_transport
+
+        client = GLMClient(
+            transport=build_zai_transport(base_url=base_url, api_key=api_key),
+            model=DEFAULT_GLM_MODEL,
+            max_tokens=max_tokens,
+            temperature=0.4,
+        )
+        return client.complete(system, user)
+
+    def _build_task_verifier(self, api_key: str, base_url: str) -> Callable[[Any], bool]:
+        """Build the solve+verify guard: a fresh agent attempts the task, Codex confirms the criterion."""
+
+        from self_harness.adapters.agentic.agent_loop import run_agent_loop
+        from self_harness.adapters.agentic.codex_verifier import CodexVerifier
+        from self_harness.adapters.llm.messages import AnthropicAgentTransport
+        from self_harness.adapters.terminal_bench.agent_render import render_system_prompt
+
+        spec = self._final_harness_spec_or_initial()
+
+        def _verify(task: Any) -> bool:
+            meta = task.get("metadata", {})
+            instructions = meta.get("instructions", "")
+            success_criteria = meta.get("success_criteria", "")
+            if not instructions or not success_criteria:
+                return False
+            workdir = Path(tempfile.mkdtemp(prefix="self-harness-taskgen-"))
+            try:
+                _seed_workspace_files(meta.get("workspace_files") or {}, workdir)
+                loop = run_agent_loop(
+                    transport=AnthropicAgentTransport(base_url=base_url, api_key=api_key, model="glm-5.2"),
+                    system_prompt=render_system_prompt(spec),
+                    task_prompt=f"Task: {instructions}\n\nWork in the current directory. Stop when done.",
+                    workdir=workdir,
+                    env=dict(os.environ),
+                    max_steps=self.max_steps,
+                    tool_timeout_seconds=self.tool_timeout_seconds,
+                )
+                if loop.stop_reason == "model_error":
+                    return False
+                verdict = CodexVerifier(binary=self.codex_binary).judge(
+                    success_criteria=success_criteria, task_description=instructions, workdir=workdir
+                )
+                return verdict.passed
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
+
+        return _verify
+
+    def _final_harness_spec_or_initial(self) -> HarnessSpec:
+        spec = self._load_persisted_harness()
+        if spec is not None:
+            return spec
+        from self_harness.harness import initial_harness
+
+        return initial_harness()
+
     def start_autoloop(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Start the continuous self-improvement loop: launch evolving runs back-to-back until stopped.
 
@@ -509,17 +725,31 @@ class HarnessUiApp:
     def _autoloop_run(self, template: dict[str, Any]) -> None:
         try:
             while not self._autoloop_stop.is_set():
+                # Feed the loop new failures before each iteration: drain real failures from the inbox,
+                # and (only when starved) generate synthetic ones. New tasks are held-in; the static
+                # corpus's held-out stays a fixed regression yardstick.
+                with self._lock:
+                    last_outcome = self._autoloop.get("last_outcome")
+                ingested = self._drain_inbox()
+                generated = self._maybe_generate_tasks(last_outcome)
+
                 job, evolve = self._make_job(template)
                 with self._lock:
                     self._jobs[job.id] = job
+                corpus_path = self._assemble_iteration_corpus(job.path)
+                source = "inbox" if ingested else ("generated" if generated else "base")
                 # Run inline (not a new thread) so iterations are strictly sequential — each run starts
                 # from the harness the previous run promoted.
-                self._run_job(job.id, evolve=evolve)
+                self._run_job(job.id, evolve=evolve, corpus_path=corpus_path)
                 with self._lock:
                     finished = self._jobs[job.id]
                     promoted = bool((finished.summary or {}).get("accepted_count"))
                     self._autoloop["runs_completed"] += 1
                     self._autoloop["last_run_id"] = finished.run_id
+                    self._autoloop["inbox_ingested"] += ingested
+                    self._autoloop["tasks_generated"] += generated
+                    self._autoloop["learned_task_count"] = len(self._load_learned_tasks())
+                    self._autoloop["last_source"] = source
                     if finished.status == "failed":
                         self._autoloop["last_outcome"] = "failed"
                     elif promoted:
@@ -538,7 +768,7 @@ class HarnessUiApp:
                 self._autoloop["active"] = False
             _log("autoloop stopped")
 
-    def _run_job(self, job_id: str, *, evolve: bool = True) -> None:
+    def _run_job(self, job_id: str, *, evolve: bool = True, corpus_path: Path | None = None) -> None:
         with self._lock:
             job = self._jobs[job_id]
             job.status = "running"
@@ -564,6 +794,7 @@ class HarnessUiApp:
                 out_dir=path,
                 initial_spec=initial_spec,
                 on_usage=_accumulate_usage,
+                corpus_path=corpus_path,
             )
             summaries = engine.run()
             promotion: dict[str, Any] | None = None
@@ -605,6 +836,7 @@ class HarnessUiApp:
         out_dir: Path,
         initial_spec: HarnessSpec | None,
         on_usage: Callable[[dict[str, int]], None],
+        corpus_path: Path | None = None,
     ) -> SelfHarnessEngine:
         """Construct the engine for the requested run mode.
 
@@ -638,6 +870,7 @@ class HarnessUiApp:
                 out_dir=out_dir,
                 initial_spec=initial_spec,
                 on_usage=on_usage,
+                corpus_path=corpus_path,
             )
         raise ValueError(f"unsupported run mode: {run_mode}")
 
@@ -900,6 +1133,8 @@ def serve_ui(
     tool_timeout_seconds: int = 30,
     codex_binary: str = "codex",
     auto_promote_to_source: bool = True,
+    task_generation: bool = True,
+    generation_guard: bool = False,
 ) -> int:
     app = HarnessUiApp(
         root=root,
@@ -910,6 +1145,8 @@ def serve_ui(
         tool_timeout_seconds=tool_timeout_seconds,
         codex_binary=codex_binary,
         auto_promote_to_source=auto_promote_to_source,
+        task_generation=task_generation,
+        generation_guard=generation_guard,
     )
     server = ThreadingHTTPServer((host, port), _make_handler(app))
     print(f"SelfHarness UI listening on http://{host}:{server.server_port} proposer={app.proposer_mode}")
@@ -981,6 +1218,9 @@ def _make_handler(app: HarnessUiApp) -> type[BaseHTTPRequestHandler]:
                     return
                 if parsed.path == "/api/autoloop/stop":
                     self._send_json(app.stop_autoloop())
+                    return
+                if parsed.path == "/api/inbox":
+                    self._send_json(app.submit_inbox_bundle(self._read_json()), status=HTTPStatus.ACCEPTED)
                     return
                 if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/promote-to-source"):
                     run_id = parsed.path.removeprefix("/api/runs/").removesuffix("/promote-to-source").strip("/")
@@ -1510,9 +1750,27 @@ _HTML = r"""<!doctype html>
               <span :style="autoloop.active ? 'color:var(--ok)' : ''" x-text="autoloop.active ? '● running' : '○ idle'"></span>
               <span x-text="(autoloop.runs_completed||0) + ' runs'"></span>
               <span :style="(autoloop.edits_promoted||0) ? 'color:var(--ok)' : ''" x-text="(autoloop.edits_promoted||0) + ' edits promoted'"></span>
+              <span x-show="autoloop.last_source" x-text="'source: ' + autoloop.last_source"></span>
               <span x-show="autoloop.last_outcome" x-text="'last: ' + autoloop.last_outcome"></span>
             </div>
             <div x-show="autoloop.error" class="muted" style="font-size:12px; color:var(--danger); margin-top:6px;" x-text="autoloop.error"></div>
+
+            <div class="muted" style="font-size:12px; margin-top:10px; display:flex; flex-wrap:wrap; gap:4px 12px;">
+              <span x-text="'inbox: ' + (inboxDepth||0) + ' pending'"></span>
+              <span x-text="'learned: ' + (learnedTaskCount||0) + ' tasks'"></span>
+              <span x-show="(autoloop.tasks_generated||0)" x-text="(autoloop.tasks_generated||0) + ' generated this session'"></span>
+            </div>
+            <div style="margin-top:8px;">
+              <a href="#" @click.prevent="showInbox = !showInbox" class="muted" style="font-size:12px;" x-text="showInbox ? '− hide failing-bundle form' : '+ submit a failing test (feed the loop)'"></a>
+            </div>
+            <div x-show="showInbox" style="margin-top:8px; display:flex; flex-direction:column; gap:6px;">
+              <input type="text" x-model="bundle.id" placeholder="id (e.g. fix-parser-bug)" style="font-size:12px;">
+              <input type="text" x-model="bundle.command" placeholder="failing command (e.g. python3 test.py)" style="font-size:12px;">
+              <textarea x-model="bundle.fileName" placeholder="optional: one file path (e.g. test.py)" rows="1" style="font-size:12px;"></textarea>
+              <textarea x-model="bundle.fileContent" placeholder="optional: that file's contents" rows="3" style="font-size:12px;"></textarea>
+              <button class="primary tiny" @click="submitBundle()" :disabled="!bundle.id || !bundle.command">Add to inbox</button>
+              <div class="muted" style="font-size:11px;">Dropped as a held-in task ("make this command pass"). The static held-out set stays fixed, so the loop's improvements stay honest.</div>
+            </div>
           </div>
         </div>
       </section>
@@ -1777,6 +2035,7 @@ _HTML = r"""<!doctype html>
         harnessState: { evolving: false, source_run: null, harness_hash: null },
         autoPromote: true, seenPromotions: {},
         autoloop: { active: false, runs_completed: 0, edits_promoted: 0, last_outcome: null, error: null }, autoloopStopping: false,
+        inboxDepth: 0, learnedTaskCount: 0, showInbox: false, bundle: { id: '', command: '', fileName: '', fileContent: '' },
         form: { evolve: true, rounds: 3, seed: 0, evaluation_repeats: 2, max_proposals: 8, max_payload_bytes: 600 },
         dev: { instructions: '', success_criteria: '', use_repo: false, max_steps: 12, running: false, result: null, error: '' },
         chat: { messages: [], input: '', sending: false, error: '', usage: {} },
@@ -1807,6 +2066,8 @@ _HTML = r"""<!doctype html>
             this.harnessState = state.harness_state || { evolving: false };
             this.autoPromote = state.auto_promote_to_source !== false;
             if (state.autoloop) { this.autoloop = state.autoloop; if (!state.autoloop.active) this.autoloopStopping = false; }
+            this.inboxDepth = state.inbox_depth || 0;
+            this.learnedTaskCount = state.learned_task_count || 0;
             for (const j of (state.jobs || [])) {
               if (j.status === 'completed' && j.source_promotion && !this.seenPromotions[j.id]) {
                 this.seenPromotions[j.id] = true;
@@ -1868,6 +2129,20 @@ _HTML = r"""<!doctype html>
             if (r.autoloop) this.autoloop = r.autoloop;
             this.flash('Continuous loop will stop after the current run.');
           } catch (e) { this.flash('autoloop stop failed: ' + e.message); }
+        },
+        async submitBundle() {
+          if (!this.bundle.id || !this.bundle.command) return;
+          const body = { id: this.bundle.id, command: this.bundle.command };
+          if (this.bundle.fileName && this.bundle.fileContent) {
+            body.files = {}; body.files[this.bundle.fileName] = this.bundle.fileContent;
+          }
+          try {
+            const r = await this.api('/api/inbox', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            this.inboxDepth = r.inbox_depth || this.inboxDepth + 1;
+            this.bundle = { id: '', command: '', fileName: '', fileContent: '' };
+            this.showInbox = false;
+            this.flash('Failing bundle added to inbox; the loop will learn from it next iteration.');
+          } catch (e) { this.flash('inbox submit failed: ' + e.message); }
         },
         async runDevTask() {
           this.dev.running = true; this.dev.error = ''; this.dev.result = null;
