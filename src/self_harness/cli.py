@@ -204,20 +204,21 @@ def run_console_default() -> int:
 
 
 def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
-    """Run the continuous self-improvement loop in the foreground until Ctrl-C (home menu [2] Loop).
+    """Run the continuous self-improvement loop in the foreground until Ctrl-C / SIGTERM.
 
     Reuses the web app's autoloop controller (HarnessUiApp.start_autoloop) without serving HTTP, then
-    blocks, printing periodic status, until the user interrupts.
+    blocks, printing periodic status, until interrupted. SIGTERM (sent by `loop stop` when this is the
+    backgrounded process) is handled the same as Ctrl-C: stop after the current run, then exit cleanly.
     """
 
+    import signal
     import time
 
     from self_harness.agentic_session import HOST_EXEC_WARNING_LINES
+    from self_harness.loop_paths import loop_root
     from self_harness.ui import HarnessUiApp
 
-    root = Path.home() / "Documents" / "SelfHarness"
-    if not (root / "examples" / "agentic_corpus.json").is_file():
-        root = Path.cwd()
+    root = loop_root()
 
     for line in HOST_EXEC_WARNING_LINES:
         print(line)
@@ -233,7 +234,14 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
     if not result.get("ok"):
         print(f"could not start loop: {result.get('message')}")
         return 1
-    print("Continuous self-improvement loop started. Press Ctrl-C to stop.\n")
+
+    # Translate SIGTERM into KeyboardInterrupt so the graceful-stop path below handles both.
+    def _on_term(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_term)
+
+    print("Continuous self-improvement loop started. Press Ctrl-C to stop.\n", flush=True)
     try:
         while True:
             time.sleep(10)
@@ -241,19 +249,19 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0) -> int:
             done = state.get("runs_completed", 0)
             edits = state.get("edits_promoted", 0)
             last = state.get("last_outcome") or "running…"
-            print(f"  loop: {done} run(s) completed, {edits} edit(s) promoted — {last}")
+            print(f"  loop: {done} run(s) completed, {edits} edit(s) promoted — {last}", flush=True)
             if not state.get("active") and state.get("error"):
-                print(f"  loop error: {state['error']}")
+                print(f"  loop error: {state['error']}", flush=True)
                 return 1
     except KeyboardInterrupt:
-        print("\nstopping loop after the current run…")
+        print("\nstopping loop after the current run…", flush=True)
         app.stop_autoloop()
         # Give the controller a moment to observe the stop flag.
         for _ in range(6):
             if not app.state().get("autoloop", {}).get("active"):
                 break
             time.sleep(0.5)
-        print("loop stopped.")
+        print("loop stopped.", flush=True)
         return 0
 
 
@@ -281,10 +289,23 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     loop_parser = subparsers.add_parser(
-        "loop", help="start the continuous self-improvement loop (Ctrl-C to stop)"
+        "loop", help="start the continuous self-improvement loop (foreground, or --background)"
+    )
+    loop_parser.add_argument(
+        "loop_action",
+        nargs="?",
+        choices=("start", "status", "stop"),
+        default="start",
+        help="start (default), status (is it running + recent log), or stop a background loop",
     )
     loop_parser.add_argument("--rounds", type=int, default=1, help="evolution rounds per iteration")
     loop_parser.add_argument("--seed", type=int, default=0)
+    loop_parser.add_argument(
+        "--background",
+        "-b",
+        action="store_true",
+        help="run detached so it survives closing the terminal (manage with `loop status` / `loop stop`)",
+    )
 
     demo_parser = subparsers.add_parser("demo", help="run the deterministic Self-Harness demo")
     demo_parser.add_argument("--rounds", type=int, default=3)
@@ -1071,6 +1092,14 @@ def main(argv: list[str] | None = None) -> int:
 
         return cli_home.run_settings(list(args.settings_args or []))
     if args.command == "loop":
+        from self_harness import loop_daemon
+
+        if args.loop_action == "status":
+            return loop_daemon.status()
+        if args.loop_action == "stop":
+            return loop_daemon.stop_background()
+        if args.background:
+            return loop_daemon.start_background(rounds=args.rounds, seed=args.seed)
         return run_loop_default(rounds=args.rounds, seed=args.seed)
     if args.command == "demo":
         return _run_demo(

@@ -72,6 +72,11 @@ Loop — continuous self-improvement
     5. Bakes accepted edits into the next iteration — so it's monotonic by construction.
   It also drains failures harvested from your real `code` sessions, so it gets better at YOUR work.
   Leave it running; it never regresses the held-out set.
+
+  Run it in the background (survives closing the terminal):
+    self-harness loop --background     start detached
+    self-harness loop status           is it running? + recent activity
+    self-harness loop stop             stop gracefully (finishes the current run first)
 """,
     "console": """\
 Console — the web dashboard
@@ -364,15 +369,44 @@ def _menu_console() -> None:
 
 
 def _menu_loop() -> None:
-    from self_harness import cli
+    from self_harness import cli, loop_daemon
 
+    running = loop_daemon.is_running()
     print()
+    if running is not None:
+        print(f"The continuous loop is running in the background (pid {running}).")
+        print("  [s] show status + recent activity")
+        print("  [x] stop it")
+        print("  [enter] back")
+        try:
+            choice = input("loop › ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in {"s", "status"}:
+            loop_daemon.status()
+        elif choice in {"x", "stop"}:
+            loop_daemon.stop_background()
+        return
+
+    print("Start the continuous self-improvement loop:")
+    print("  [f] foreground — watch it live (Ctrl-C to stop)")
+    print("  [b] background — keep running after you close the terminal")
+    print("  [enter] back")
     try:
-        cli.run_loop_default()
-    except KeyboardInterrupt:
-        print("\n(loop stopped)")
-    except Exception as exc:  # noqa: BLE001
-        print(f"error running loop: {exc}")
+        choice = input("loop › ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if choice in {"b", "background", "bg"}:
+        loop_daemon.start_background()
+    elif choice in {"f", "foreground", "fg"}:
+        try:
+            cli.run_loop_default()
+        except KeyboardInterrupt:
+            print("\n(loop stopped)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"error running loop: {exc}")
 
 
 def _menu_help() -> None:
