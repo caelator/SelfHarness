@@ -141,6 +141,7 @@ from self_harness.reproduction_readiness import (
     load_readiness_matrix_report,
     load_reproduction_requirements,
 )
+from self_harness.research import ResearchConfig, ResearchIntegrator
 from self_harness.signing import (
     DEFAULT_SIGNER_MAX_OUTPUT_BYTES,
     DEFAULT_SIGNER_TIMEOUT_SECONDS,
@@ -354,6 +355,16 @@ def main(argv: list[str] | None = None) -> int:
         "--fail-on-empty",
         action="store_true",
         help="exit non-zero if no proposal is accepted during the run",
+    )
+    demo_parser.add_argument(
+        "--research-dir",
+        default=None,
+        help="enable research-radar integration, scanning this project dir for keywords",
+    )
+    demo_parser.add_argument(
+        "--research-skip-scan",
+        action="store_true",
+        help="use cached research findings without triggering a new scan",
     )
 
     ui_parser = subparsers.add_parser("ui", help="serve the SelfHarness web operator interface")
@@ -1155,6 +1166,8 @@ def main(argv: list[str] | None = None) -> int:
             max_proposals=args.max_proposals,
             max_payload_bytes=args.max_payload_bytes,
             fail_on_empty=args.fail_on_empty,
+            research_dir=getattr(args, "research_dir", None),
+            research_skip_scan=getattr(args, "research_skip_scan", False),
         )
     if args.command == "ui":
         from self_harness.ui import serve_ui
@@ -1498,6 +1511,8 @@ def _run_demo(
     max_proposals: int,
     max_payload_bytes: int,
     fail_on_empty: bool,
+    research_dir: str | None = None,
+    research_skip_scan: bool = False,
 ) -> int:
     config = EngineConfig(
         rounds=rounds,
@@ -1509,12 +1524,23 @@ def _run_demo(
         ),
         fail_on_empty=fail_on_empty,
     )
+    research_integrator = None
+    if research_dir:
+        research_integrator = ResearchIntegrator(
+            ResearchConfig(
+                enabled=True,
+                project_dir=research_dir,
+                skip_scan=research_skip_scan,
+            )
+        )
+
     engine = SelfHarnessEngine(
         tasks=demo_tasks(),
         runner=DeterministicRunner(seed=seed),
         proposer=HeuristicProposer(),
         out_dir=out_dir,
         config=config,
+        research_integrator=research_integrator,
     )
     summaries = engine.run()
 

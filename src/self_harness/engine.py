@@ -21,6 +21,7 @@ from self_harness.harness import (
 from self_harness.llm_proposer import LLMClient, LLMProposer
 from self_harness.mining import cluster_failures
 from self_harness.proposer import Proposer
+from self_harness.research import ResearchFindings, ResearchIntegrator
 from self_harness.types import (
     AcceptDecision,
     AttemptedEdit,
@@ -116,6 +117,7 @@ class SelfHarnessEngine:
         evaluation_repeats: int = 2,
         config: EngineConfig | None = None,
         aggregation: str = "sum",
+        research_integrator: ResearchIntegrator | None = None,
     ) -> None:
         if config is None:
             config = EngineConfig(
@@ -140,6 +142,7 @@ class SelfHarnessEngine:
         self.attempted_edits: list[AttemptedEdit] = []
         self.proposer_request_log: list[ProposerRoundRecord] | None = None
         self._recording_client: RecordingLLMClient | None = None
+        self.research_integrator = research_integrator
 
     def enable_proposer_request_log(self) -> None:
         """Record proposer LLM request/response hashes for later live capture extraction."""
@@ -152,6 +155,13 @@ class SelfHarnessEngine:
         self._maybe_wrap_llm_proposer()
         self._write_manifest()
         summaries: list[RoundSummary] = []
+
+        # Ensure a research-radar profile exists for the project (one-time setup)
+        if self.research_integrator is not None and self.research_integrator.is_available:
+            profile = self.research_integrator.ensure_profile()
+            if profile:
+                import sys
+                print(f"[research] using profile '{profile}'", file=sys.stderr)
         round_limit = self.config.rounds if max_rounds is None else max_rounds
 
         for round_index in range(round_limit):
@@ -175,6 +185,28 @@ class SelfHarnessEngine:
             # proposer, so the cross-case evidence grounding each proposal is independently
             # auditable from the round artifacts rather than only referenced by pattern_id.
             write_stable_json(round_dir / "patterns.json", patterns)
+
+            # ── Research-radar integration ──
+            research_findings = ResearchFindings()
+            if self.research_integrator is not None and self.research_integrator.is_available:
+                research_findings = self.research_integrator.fetch_findings()
+                if not research_findings.is_empty:
+                    patterns = patterns + research_findings.patterns
+                    self.harness = replace(
+                        self.harness,
+                        memory_sources=list(self.harness.memory_sources)
+                        + research_findings.memory_sources,
+                    )
+                    write_stable_json(
+                        round_dir / "research_findings.json",
+                        {
+                            "count": len(research_findings.raw),
+                            "patterns_injected": len(research_findings.patterns),
+                            "memory_sources_injected": len(research_findings.memory_sources),
+                            "findings": research_findings.raw,
+                        },
+                    )
+
             context = ProposerContext(
                 held_in_patterns=patterns,
                 passing_summaries=_passing_summaries(baseline.records),
