@@ -960,4 +960,3 @@ are audited as invalid candidates with explicit reasons.
 
 - Paper: https://arxiv.org/abs/2606.09498
 - Article: https://venturebeat.com/orchestration/researchers-introduce-self-harness-a-framework-that-lets-ai-agents-rewrite-their-own-rules-boosting-performance-up-to-60/
-# test marker
