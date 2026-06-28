@@ -114,33 +114,44 @@ class InteractiveSession:
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
         on_tool_event: Callable[[str, str, bool], None] | None = None,
+        on_tool_starting: Callable[[str, str], None] | None = None,
+        on_model_request: Callable[[int], None] | None = None,
     ) -> TurnResult:
         """Run one user turn through the agentic loop, persisting conversation state and harvesting.
 
         When ``on_text_delta`` is provided, a streaming transport is used so the reply arrives token by
         token (interactive UI); otherwise the blocking transport is used (tests, piped/non-tty). The
-        ``on_tool_event(name, summary, ok)`` callback fires as each tool completes, in addition to the
-        always-recorded ``tool_activity`` list.
+        ``on_tool_event(name, summary, ok)`` callback fires as each tool completes; ``on_tool_starting``
+        fires just before a tool runs (for "running X…" feedback); ``on_model_request(step)`` fires before
+        each model call. All are in addition to the always-recorded ``tool_activity`` list.
         """
 
         self.turn_index += 1
         activity: list[str] = []
 
+        def _summarize(name: str, tool_input: Any) -> str:
+            if name == "bash":
+                return f"$ {str(tool_input.get('command', ''))[:80]}"
+            if name in {"read_file", "write_file"}:
+                return str(tool_input.get("path", ""))
+            return name
+
         def _observe(name: str, tool_input: Any, result: Any) -> None:
             self.harvester.observe(name, tool_input, result)
             ok = not result.is_error
+            summary = _summarize(name, tool_input)
             if name == "bash":
-                cmd = str(tool_input.get("command", ""))[:80]
-                summary = f"$ {cmd}"
-                activity.append(f"bash: {cmd} ({'ok' if ok else 'error'})")
+                activity.append(f"bash: {summary[2:]} ({'ok' if ok else 'error'})")
             elif name in {"read_file", "write_file"}:
-                summary = str(tool_input.get("path", ""))
                 activity.append(f"{name}: {summary}")
             else:
-                summary = name
                 activity.append(name)
             if on_tool_event is not None:
                 on_tool_event(name, summary, ok)
+
+        def _starting(name: str, tool_input: Any) -> None:
+            if on_tool_starting is not None:
+                on_tool_starting(name, _summarize(name, tool_input))
 
         if on_text_delta is not None:
             transport: MessagesTransport = self._streaming_transport(on_text_delta, on_tool_start)
@@ -157,6 +168,8 @@ class InteractiveSession:
             tool_timeout_seconds=self.tool_timeout_seconds,
             history=self.history,
             on_tool_result=_observe,
+            on_tool_start=_starting if on_tool_starting is not None else None,
+            on_model_request=on_model_request,
         )
         harvested = self.harvester.flush(id_prefix=f"cli-{self.turn_index:03d}")
         return TurnResult(

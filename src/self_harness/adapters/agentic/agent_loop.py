@@ -21,6 +21,10 @@ DEFAULT_MAX_STEPS = 12
 # react to tool activity — e.g. harvest failing commands — without the loop knowing about that concern.
 ToolObserver = Callable[[str, Mapping[str, Any], ToolResult], None]
 
+# Fired right BEFORE a tool executes (tool name, its input). Lets an interactive caller show "running X…"
+# feedback during what is often the longest, silent part of a turn (e.g. a multi-minute `cargo test`).
+ToolStarter = Callable[[str, Mapping[str, Any]], None]
+
 
 @dataclass
 class AgentLoopResult:
@@ -47,6 +51,8 @@ def run_agent_loop(
     tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS,
     history: list[dict[str, Any]] | None = None,
     on_tool_result: ToolObserver | None = None,
+    on_tool_start: ToolStarter | None = None,
+    on_model_request: Callable[[int], None] | None = None,
 ) -> AgentLoopResult:
     """Drive a tool-calling agent until it stops, hits the step budget, or errors.
 
@@ -70,6 +76,8 @@ def run_agent_loop(
     tool_calls = 0
 
     for step in range(max_steps):
+        if on_model_request is not None:
+            on_model_request(step)
         try:
             turn = transport.create_message(
                 system=system_prompt,
@@ -118,6 +126,8 @@ def run_agent_loop(
             name = str(tool_use.get("name", ""))
             tool_input = tool_use.get("input")
             tool_input_map: Mapping[str, Any] = tool_input if isinstance(tool_input, Mapping) else {}
+            if on_tool_start is not None:
+                on_tool_start(name, tool_input_map)
             result = execute_tool(
                 name,
                 tool_input_map,

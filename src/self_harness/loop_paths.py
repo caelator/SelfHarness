@@ -17,3 +17,15 @@ def loop_root() -> Path:
     if (central / "examples" / "agentic_corpus.json").is_file():
         return central
     return Path.cwd()
+
+
+def central_runs_dir() -> Path | None:
+    """The shared ``runs`` dir under the central checkout, or None if the checkout isn't present.
+
+    This is the single evolving-harness + failure-inbox location that the coding agent and the continuous
+    loop share, so improvements flow between them. ``self-harness code`` defaults to it (rather than a
+    dead per-project ``runs/inbox`` that the loop never reads) when it exists.
+    """
+
+    central = Path.home() / "Documents" / "SelfHarness" / "runs"
+    return central if (central / "harness_state.json").is_file() else None

@@ -60,7 +60,11 @@ Code — the interactive coding agent
     • /exit                leave.
 
   Auto-run: commands execute directly on your machine (no sandbox). Use it on code you trust.
-  Flywheel: failing tests/builds it hits are harvested so the Loop can learn from them.
+  Flywheel: failing tests/builds it hits are harvested so the Loop can learn from them. By default
+  `code` shares ONE central harness + failure inbox (under ~/Documents/SelfHarness/runs) across every
+  project, so the loop learns from your real sessions; pass --local-harness for a per-project one.
+  Long tasks: if the agent reaches its per-turn step budget it auto-continues a few times instead of
+  stopping; type a new instruction any time to redirect.
 """,
     "loop": """\
 Loop — continuous self-improvement

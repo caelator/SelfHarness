@@ -303,3 +303,34 @@ def test_renderer_uses_fallback_text_when_no_deltas(capsys) -> None:  # type: ig
     renderer.end_stream(fallback_text="the whole answer", stop_reason="end_turn")
     out = capsys.readouterr().out
     assert out.count("the whole answer") == 1
+
+
+def test_heartbeat_plain_emits_activity_lines(capsys) -> None:  # type: ignore[no-untyped-def]
+    # In plain mode the heartbeat can't animate, so phase changes emit throttled "Working…" lines —
+    # the user always has feedback, including during the otherwise-silent tool-running stretch.
+    from self_harness.cli_agent.ui import ConsoleRenderer
+
+    renderer = ConsoleRenderer(plain=True)
+    renderer.begin_turn()
+    renderer.set_phase("thinking")
+    renderer.tool_starting("bash", "$ cargo test")  # phase change -> forced tick
+    renderer.tool_event("bash", "$ cargo test", True)
+    renderer.push_delta("done")
+    renderer.end_stream(stop_reason="end_turn")
+    out = capsys.readouterr().out
+    assert "Working…" in out
+    assert "running $ cargo test" in out  # the tool phase is surfaced
+    assert "done" in out
+
+
+def test_heartbeat_renderable_clock_advances() -> None:
+    # The _Heartbeat text must reflect elapsed time computed at render time (so rich's refresh thread
+    # makes it tick even while the main thread is blocked). Simulate by moving its start time back.
+    from self_harness.cli_agent.ui import _Heartbeat
+
+    hb = _Heartbeat()
+    hb.start -= 75  # pretend 75s elapsed
+    hb.tokens = 3500
+    text = hb.render_plain()
+    assert "1m 15s" in text
+    assert "3.5k tokens" in text

@@ -109,6 +109,9 @@ def run_repl(
     return 0
 
 
+_MAX_AUTO_CONTINUE = 4  # how many times a turn may auto-resume after hitting the step budget
+
+
 def _run_turn(
     session: InteractiveSession,
     line: str,
@@ -120,37 +123,62 @@ def _run_turn(
     if inlined:
         renderer.info("  @ inlined: " + ", ".join(inlined))
 
-    renderer.start_stream()
-    streamed = False
-
     def _on_delta(delta: str) -> None:
-        nonlocal streamed
-        streamed = True
+        # Approximate token count from streamed characters (~4 chars/token) for the live heartbeat.
+        renderer.add_tokens(max(1, len(delta) // 4))
         renderer.push_delta(delta)
 
     def _on_tool_event(name: str, summary: str, ok: bool) -> None:
         # Each tool event commits the preceding text step, so streamed text and tool lines stay separated.
         renderer.tool_event(name, summary, ok)
 
-    try:
-        result = session.send(
-            augmented,
-            on_text_delta=_on_delta,
-            on_tool_event=_on_tool_event,
-        )
-    except Exception as exc:  # noqa: BLE001 - surface any transport/runtime error without crashing the REPL.
-        renderer.end_stream(stop_reason="error")
-        renderer.error(f"  ! error: {exc}")
-        return
+    def _on_tool_starting(name: str, summary: str) -> None:
+        # The longest silent stretch of a turn — show "running <cmd>…" so it never looks frozen.
+        renderer.tool_starting(name, summary)
 
-    renderer.end_stream(fallback_text=result.final_text.strip(), stop_reason=result.stop_reason)
-    if result.error:
-        renderer.error(f"  ! {result.error}")
-    renderer.harvest_note(len(result.harvested))
+    def _on_model_request(step: int) -> None:
+        renderer.set_phase("thinking")
 
-    _record_turn(record, line, result)
-    record.history[:] = list(session.history)  # snapshot conversation so a resume continues exactly here.
-    _save(record, root)
+    # Send the user's message; if the agent runs out of step budget mid-task, auto-continue a bounded
+    # number of times instead of stopping silently (the old behavior that left big tasks half-done).
+    message = augmented
+    result = None
+    for attempt in range(_MAX_AUTO_CONTINUE + 1):
+        renderer.begin_turn()
+        try:
+            result = session.send(
+                message,
+                on_text_delta=_on_delta,
+                on_tool_event=_on_tool_event,
+                on_tool_starting=_on_tool_starting,
+                on_model_request=_on_model_request,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface any transport/runtime error without crashing.
+            renderer.end_stream(stop_reason="error")
+            renderer.error(f"  ! error: {exc}")
+            return
+
+        renderer.end_stream(fallback_text=result.final_text.strip(), stop_reason=result.stop_reason)
+        if result.error:
+            renderer.error(f"  ! {result.error}")
+        renderer.harvest_note(len(result.harvested))
+        _record_turn(record, message if attempt == 0 else "(auto-continue)", result)
+        record.history[:] = list(session.history)
+        _save(record, root)
+
+        if result.stop_reason != "max_steps":
+            break
+        if attempt < _MAX_AUTO_CONTINUE:
+            renderer.info(
+                f"  … hit the {session.max_steps}-step budget; auto-continuing "
+                f"({attempt + 1}/{_MAX_AUTO_CONTINUE}). Type a new instruction to redirect."
+            )
+            message = "Continue where you left off until the task is complete."
+        else:
+            renderer.info(
+                f"  … still working after {_MAX_AUTO_CONTINUE} auto-continues. "
+                "Say 'continue' to keep going, or give a narrower next step."
+            )
 
 
 def _record_turn(record: SessionRecord, line: str, result: object) -> None:

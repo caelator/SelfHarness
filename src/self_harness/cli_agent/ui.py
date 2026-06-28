@@ -17,9 +17,27 @@ Markdown (tables, fenced code) on the final text, and separates each step cleanl
 from __future__ import annotations
 
 import sys
+import time
 from typing import Any
 
 from self_harness.console_style import STYLES
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _fmt_elapsed(seconds: float) -> str:
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    return f"{s // 60}m {s % 60:02d}s"
+
+
+def _fmt_tokens(n: int) -> str:
+    if n < 1000:
+        return str(n)
+    return f"{n / 1000:.1f}k"
 
 # Pull the shared palette so the chat matches the menu/settings/help/loop coloring exactly.
 _GLM = STYLES["glm"]
@@ -39,10 +57,11 @@ class ConsoleRenderer:
         self.plain = plain or not sys.stdout.isatty()
         self._console: Any = None
         self._live: Any = None
-        self._spinner: Any = None
+        self._heartbeat: Any = None  # _Heartbeat renderable driving the "Working…" line
         self._buffer = ""
         self._plain_emitted = 0  # chars of the current buffer already streamed to screen (plain mode)
         self._label_shown = False
+        self._plain_last_tick = 0.0  # throttle for plain-mode periodic activity lines
         if not self.plain:
             try:
                 from rich.console import Console
@@ -92,26 +111,61 @@ class ConsoleRenderer:
         self._console.print("you › ", style=_USER, end="")
         return input()
 
-    # -- thinking spinner -------------------------------------------------------------------------
+    # -- per-turn activity heartbeat --------------------------------------------------------------
 
-    def thinking(self) -> Any:
-        """Context manager: a spinner shown until the first token arrives (rich), or a no-op (plain)."""
+    def begin_turn(self) -> None:
+        """Start a turn: show a persistent 'Working…' heartbeat that animates on its own (rich) timer.
 
-        if self.plain or self._console is None:
-            return _NullContext()
-        from rich.status import Status
-
-        return Status("thinking…", console=self._console, spinner="dots")
-
-    # -- streamed assistant reply -----------------------------------------------------------------
-
-    def start_stream(self) -> None:
-        """Begin a turn. No output yet — the 'glm ›' label and any region appear lazily on first token."""
+        The heartbeat keeps ticking elapsed time / tokens / phase even while the main thread is blocked
+        inside a model request or a long tool subprocess, because rich's Live runs a background refresh
+        thread and the renderable recomputes elapsed time at render time.
+        """
 
         self._buffer = ""
         self._plain_emitted = 0
         self._label_shown = False
-        self._live = None
+        self._plain_last_tick = _now()
+        if self.plain or self._console is None:
+            self._heartbeat = _PlainHeartbeat()
+            return
+        from rich.live import Live
+
+        self._heartbeat = _Heartbeat()
+        self._live = Live(
+            self._heartbeat,
+            console=self._console,
+            refresh_per_second=4,
+            transient=True,  # the one-line heartbeat is erased when we commit text or finish
+        )
+        self._live.start()
+
+    # Back-compat alias: callers that predate begin_turn() still work.
+    def start_stream(self) -> None:
+        self.begin_turn()
+
+    def set_phase(self, phase: str) -> None:
+        """Update what the heartbeat says we're doing (e.g. 'thinking', 'running cargo test')."""
+
+        if self._heartbeat is not None:
+            self._heartbeat.phase = phase
+        if self.plain or self._console is None:
+            self._maybe_plain_tick(force=True)
+
+    def add_tokens(self, count: int) -> None:
+        if count and self._heartbeat is not None:
+            self._heartbeat.tokens += count
+
+    def _maybe_plain_tick(self, *, force: bool = False) -> None:
+        # Plain/non-tty mode can't animate; emit a throttled one-line activity update instead.
+        if not (self.plain or self._console is None) or self._heartbeat is None:
+            return
+        now = _now()
+        if not force and (now - self._plain_last_tick) < 10.0:
+            return
+        self._plain_last_tick = now
+        print(f"  · {self._heartbeat.render_plain()}", flush=True)
+
+    # -- streamed assistant reply -----------------------------------------------------------------
 
     def _ensure_label(self) -> None:
         if self._label_shown:
@@ -126,39 +180,23 @@ class ConsoleRenderer:
         if not delta:
             return
         self._buffer += delta
+        if self._heartbeat is not None:
+            self._heartbeat.phase = "responding"
         if self.plain or self._console is None:
             self._ensure_label()
             print(delta, end="", flush=True)
             self._plain_emitted = len(self._buffer)
             return
-        # Rich: the live element is a SINGLE fixed line (a spinner + running char count), never the growing
-        # text itself. A one-line region is always safely erasable, so nothing can scroll off and survive.
-        # The actual text is rendered once, as Markdown, by _commit_step().
-        from rich.live import Live
-        from rich.spinner import Spinner
-
-        if self._live is None:
-            self._ensure_label()
-            self._spinner = Spinner("dots", text=self._progress_text(), style=_DIM)
-            self._live = Live(
-                self._spinner,
-                console=self._console,
-                refresh_per_second=8,
-                transient=True,  # the one-line indicator is erased on stop; the committed Markdown remains
-            )
-            self._live.start()
-        else:
-            self._spinner.update(text=self._progress_text())
-
-    def _progress_text(self) -> str:
-        return f"receiving… ({len(self._buffer)} chars)"
+        # Rich: while text streams, swap the heartbeat to show a running char count. The actual text is
+        # rendered once, as Markdown, by _commit_step() — never live (a growing multi-line buffer taller
+        # than the viewport can't be safely erased and would duplicate).
+        if self._heartbeat is not None:
+            self._heartbeat.chars = len(self._buffer)
 
     def _commit_step(self) -> None:
         """Finalize the current text step: erase the live preview and print it once as permanent Markdown."""
 
         if self.plain or self._console is None:
-            # Print any buffered text not already streamed live (e.g. fallback_text set with no deltas),
-            # then end the line. Streamed text is append-only, so we only emit the remainder.
             remainder = self._buffer[self._plain_emitted :]
             if remainder:
                 self._ensure_label()
@@ -168,31 +206,60 @@ class ConsoleRenderer:
             self._buffer = ""
             self._plain_emitted = 0
             return
-        if self._live is not None:
-            self._live.stop()  # transient → preview erased
-            self._live = None
         if self._buffer.strip():
+            # Pause the live heartbeat, print permanent Markdown above it, then the heartbeat continues.
             from rich.markdown import Markdown
 
+            if self._live is not None:
+                self._live.stop()
+            self._ensure_label()
             self._console.print(Markdown(self._buffer))
+            if self._live is not None and self._heartbeat is not None:
+                self._heartbeat.chars = 0
+                self._live.start()
         self._buffer = ""
 
     def end_stream(self, *, fallback_text: str = "", stop_reason: str = "") -> None:
         # If a non-streaming transport produced text without deltas, render it now.
         if not self._buffer and fallback_text:
             self._buffer = fallback_text
-            if not self._label_shown:
-                self._ensure_label()
-        if not self._buffer and not self._label_shown:
-            # Nothing at all was produced this turn.
+        produced = bool(self._buffer.strip())
+        # Tear the heartbeat down first so it never lingers under the final text.
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+        self._heartbeat = None
+        if produced:
+            self._commit_step_final()
+        elif not self._label_shown:
             note = f"(no text; stopped: {stop_reason})" if stop_reason else "(no response)"
             self.info(note)
-            return
-        self._commit_step()
         if not (self.plain or self._console is None):
             self._console.print()
 
+    def _commit_step_final(self) -> None:
+        # Like _commit_step but the heartbeat is already gone (end of turn): just print the text once.
+        if self.plain or self._console is None:
+            remainder = self._buffer[self._plain_emitted :]
+            if remainder:
+                self._ensure_label()
+                print(remainder, end="")
+            if self._buffer:
+                print()
+        else:
+            from rich.markdown import Markdown
+
+            self._ensure_label()
+            self._console.print(Markdown(self._buffer))
+        self._buffer = ""
+        self._plain_emitted = 0
+
     # -- tool activity ----------------------------------------------------------------------------
+
+    def tool_starting(self, name: str, summary: str) -> None:
+        """Called just before a tool runs — the longest silent stretch of a turn."""
+
+        self.set_phase(f"running {summary}" if summary else f"running {name}")
 
     def tool_event(self, name: str, summary: str, ok: bool) -> None:
         # Committing here separates the text that preceded the tool from the tool line, and finalizes that
@@ -201,6 +268,7 @@ class ConsoleRenderer:
         if self.plain or self._console is None:
             mark = "ok" if ok else "error"
             print(f"  · {name}: {summary} ({mark})")
+            self._label_shown = False
             return
         from rich.text import Text
 
@@ -209,7 +277,12 @@ class ConsoleRenderer:
         line.append("✓ " if ok else "✗ ", style=_OK if ok else _ERR)
         line.append(f"{name} ", style="bold")
         line.append(summary, style=_DIM)
+        if self._live is not None:
+            self._live.stop()
         self._console.print(line)
+        if self._live is not None and self._heartbeat is not None:
+            self._heartbeat.phase = "thinking"
+            self._live.start()
         # The next step's text should re-announce the speaker.
         self._label_shown = False
 
@@ -229,3 +302,42 @@ class _NullContext:
 
     def __exit__(self, *exc: object) -> None:
         return None
+
+
+class _Heartbeat:
+    """A one-line 'Working…' renderable that recomputes elapsed time at render time.
+
+    Because rich's Live refreshes this on its own background thread, the elapsed clock keeps ticking even
+    while the main thread is blocked inside a model request or a long tool subprocess — which is exactly
+    when the user otherwise sees nothing and wonders if it hung.
+    """
+
+    def __init__(self) -> None:
+        self.start = _now()
+        self.tokens = 0
+        self.chars = 0
+        self.phase = "thinking"
+
+    def _text(self) -> str:
+        elapsed = _fmt_elapsed(_now() - self.start)
+        parts = [elapsed]
+        if self.tokens:
+            parts.append(f"↓ {_fmt_tokens(self.tokens)} tokens")
+        if self.phase == "responding" and self.chars:
+            parts.append(f"{self.chars} chars")
+        elif self.phase:
+            parts.append(self.phase)
+        return f"Working… ({' · '.join(parts)})"
+
+    def __rich__(self) -> Any:
+        from rich.spinner import Spinner
+
+        return Spinner("dots", text=self._text(), style=_DIM)
+
+    def render_plain(self) -> str:
+        return self._text()
+
+
+class _PlainHeartbeat(_Heartbeat):
+    """Same state tracking as :class:`_Heartbeat`, used in plain mode (no rich render)."""
+

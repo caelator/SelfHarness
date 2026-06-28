@@ -151,6 +151,10 @@ from self_harness.signing import (
 )
 from self_harness.types import ProposalBudget, stable_json_dumps, to_jsonable
 
+# Coding-agent step budget per turn. A "review this 10k-LOC workspace and implement 5 fixes" task needs
+# far more than the old default of 24 tool-calling steps; 80 keeps big tasks moving while bounding cost.
+DEFAULT_CODE_MAX_STEPS = 80
+
 
 def run_code_default() -> int:
     """Launch the coding agent with sensible defaults (used by the home menu / bare flow).
@@ -162,23 +166,18 @@ def run_code_default() -> int:
     from self_harness import user_config
 
     cfg = user_config.load_config()
-    central = cfg.get("share_central_harness", True)
-    harness_state: Path | None = None
-    inbox_dir: Path | None = None
-    if central:
-        central_runs = Path.home() / "Documents" / "SelfHarness" / "runs"
-        if (central_runs / "harness_state.json").is_file():
-            harness_state = central_runs / "harness_state.json"
-            inbox_dir = central_runs / "inbox"
+    # _run_code already defaults to the shared central harness + inbox (unless --local-harness); just pass
+    # the user's saved interactive defaults through.
     return _run_code(
         root=Path.cwd(),
-        harness_state=harness_state,
-        inbox_dir=inbox_dir,
-        max_steps=int(cfg.get("max_steps", 24) or 24),
+        harness_state=None,
+        inbox_dir=None,
+        max_steps=int(cfg.get("max_steps", DEFAULT_CODE_MAX_STEPS) or DEFAULT_CODE_MAX_STEPS),
         tool_timeout_seconds=int(cfg.get("tool_timeout_seconds", 30) or 30),
         harvest=bool(cfg.get("harvest", True)),
         resume=None,
         plain=False,
+        local_harness=bool(cfg.get("share_central_harness", True) is False),
     )
 
 
@@ -405,7 +404,10 @@ def main(argv: list[str] | None = None) -> int:
         help="where harvested failing commands are dropped for the loop (default: <root>/runs/inbox)",
     )
     code_parser.add_argument(
-        "--max-steps", type=int, default=24, help="max agent tool-calling steps per turn"
+        "--max-steps",
+        type=int,
+        default=DEFAULT_CODE_MAX_STEPS,
+        help=f"max agent tool-calling steps per turn (default {DEFAULT_CODE_MAX_STEPS})",
     )
     code_parser.add_argument(
         "--tool-timeout-seconds", type=int, default=30, help="per-command timeout for tool calls"
@@ -429,6 +431,12 @@ def main(argv: list[str] | None = None) -> int:
         "--plain",
         action="store_true",
         help="disable the rich TUI (plain text output; auto-enabled when stdout is not a terminal)",
+    )
+    code_parser.add_argument(
+        "--local-harness",
+        action="store_true",
+        help="use a per-project runs/ harness + inbox instead of the shared central one "
+        "(by default `code` shares the central harness so the loop learns from your sessions)",
     )
 
     model_preflight_parser = subparsers.add_parser(
@@ -1144,6 +1152,7 @@ def main(argv: list[str] | None = None) -> int:
             harvest=args.harvest,
             resume=args.resume,
             plain=args.plain,
+            local_harness=args.local_harness,
         )
     if args.command == "model-preflight":
         return _run_model_preflight(
@@ -1631,6 +1640,7 @@ def _run_code(
     harvest: bool,
     resume: str | None = None,
     plain: bool = False,
+    local_harness: bool = False,
 ) -> int:
     """Launch the interactive GLM 5.2 coding agent (`self-harness code`)."""
 
@@ -1646,11 +1656,18 @@ def _run_code(
     from self_harness.cli_agent.session import load_session_harness
     from self_harness.cli_agent.sessions import latest_session, load_session
     from self_harness.exceptions import AgenticRunnerError
+    from self_harness.loop_paths import central_runs_dir
 
     workdir = root.resolve()
     runs_dir = workdir / "runs"
-    state_path = (harness_state or runs_dir / "harness_state.json").resolve()
-    inbox = (inbox_dir or runs_dir / "inbox").resolve()
+    # Default to the SHARED central harness + inbox so the continuous loop learns from your sessions
+    # (and the agent benefits from the loop's improvements). Explicit flags always win; --local-harness
+    # forces the old per-project behavior. Sessions stay in the project's own runs/ either way.
+    central = None if local_harness else central_runs_dir()
+    default_state = (central / "harness_state.json") if central else (runs_dir / "harness_state.json")
+    default_inbox = (central / "inbox") if central else (runs_dir / "inbox")
+    state_path = (harness_state or default_state).resolve()
+    inbox = (inbox_dir or default_inbox).resolve()
 
     try:
         api_key = resolve_zai_api_key()
