@@ -326,7 +326,7 @@ printf '%s' "model command ok" > "$out"
 
 
 class ScriptedRenderer:
-    def __init__(self, answers: Sequence[str]) -> None:
+    def __init__(self, answers: Sequence[str | BaseException]) -> None:
         self.answers = iter(answers)
         self.menus: list[tuple[str, list[tuple[str, str]], str]] = []
         self.prompts: list[str] = []
@@ -339,7 +339,10 @@ class ScriptedRenderer:
     def ask(self, label: str, *, default: str | None = None) -> str:
         del default
         self.prompts.append(label)
-        return next(self.answers)
+        answer = next(self.answers)
+        if isinstance(answer, BaseException):
+            raise answer
+        return answer
 
     def info(self, text: str) -> None:
         self.infos.append(text)
@@ -411,6 +414,98 @@ def test_model_palette_allows_custom_model_when_discovery_fails(
     assert isinstance(selected, HeadlessCliSession)
     assert selected.model == "gpt-from-future"
     assert "could not query live model catalog (provider unavailable)" in renderer.menus[1][2]
+
+
+def test_model_palette_escape_from_model_returns_to_provider(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import ModelCatalog
+    from self_harness.cli_agent.ui import BackRequested
+
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_models",
+        lambda provider, *, binary=None: ModelCatalog(("gpt-live-a", "gpt-live-b"), "fake live catalog"),
+    )
+    renderer = ScriptedRenderer(["1", BackRequested(), "0"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._model_palette(session, renderer)
+
+    assert selected is session
+    assert renderer.prompts == ["provider", "model", "provider"]
+    assert [title for title, _options, _footer in renderer.menus] == [
+        "Model / Provider",
+        "CODEX Models",
+        "Model / Provider",
+    ]
+
+
+def test_model_palette_escape_from_effort_returns_to_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import ModelCatalog
+    from self_harness.cli_agent.ui import BackRequested
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_models",
+        lambda provider, *, binary=None: ModelCatalog(("gpt-live-a", "gpt-live-b"), "fake live catalog"),
+    )
+    renderer = ScriptedRenderer(["1", "1", BackRequested(), "2", "0"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._model_palette(session, renderer)
+
+    assert isinstance(selected, HeadlessCliSession)
+    assert selected.model == "gpt-live-b"
+    assert renderer.prompts == ["provider", "model", "effort", "model", "effort"]
+
+
+def test_model_picker_escape_from_custom_returns_to_model_list(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import ModelCatalog
+    from self_harness.cli_agent.ui import BackRequested
+
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_models",
+        lambda provider, *, binary=None: ModelCatalog((), "fake live catalog", "provider unavailable"),
+    )
+    renderer = ScriptedRenderer(["c", BackRequested(), "d"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    model, cancelled = repl._model_picker("codex", session, renderer)
+
+    assert model is None
+    assert cancelled is False
+    assert renderer.prompts == ["model", "custom model id", "model"]
 
 
 def test_model_options_do_not_offer_incompatible_current_model() -> None:
@@ -724,5 +819,13 @@ def test_slash_prompt_session_builds_when_toolkit_is_available() -> None:
     from self_harness.cli_agent.ui import _build_prompt_session
 
     session = _build_prompt_session((("/menu", "palette"),))
+
+    assert session is not None
+
+
+def test_control_prompt_session_builds_when_toolkit_is_available() -> None:
+    from self_harness.cli_agent.ui import _build_control_prompt_session
+
+    session = _build_control_prompt_session()
 
     assert session is not None

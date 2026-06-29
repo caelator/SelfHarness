@@ -52,6 +52,10 @@ _HEAD = STYLES["heading"]
 SlashCommand = tuple[str, str]
 
 
+class BackRequested(Exception):
+    """Raised when the operator presses Esc in a nested CLI control prompt."""
+
+
 def slash_command_matches(text_before_cursor: str, commands: Sequence[SlashCommand]) -> list[SlashCommand]:
     """Return slash commands matching the current prompt prefix.
 
@@ -127,6 +131,22 @@ def _build_prompt_session(commands: Sequence[SlashCommand]) -> Any | None:
     )
 
 
+def _build_control_prompt_session() -> Any | None:
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.key_binding import KeyBindings
+    except Exception:  # noqa: BLE001 - optional terminal enhancement; stdlib input remains valid.
+        return None
+
+    bindings = KeyBindings()
+
+    @bindings.add("escape")
+    def _escape(event: Any) -> None:
+        event.app.exit(exception=BackRequested())
+
+    return PromptSession(key_bindings=bindings)
+
+
 class ConsoleRenderer:
     """Streamed rich UI with a plain fallback. One renderer per session."""
 
@@ -143,6 +163,7 @@ class ConsoleRenderer:
         self._slash_commands = tuple(slash_commands)
         self._console: Any = None
         self._prompt_session: Any = None
+        self._control_prompt_session: Any = None
         self._live: Any = None
         self._heartbeat: Any = None  # _Heartbeat renderable driving the "Working…" line
         self._buffer = ""
@@ -158,6 +179,8 @@ class ConsoleRenderer:
                 self.plain = True
         if not self.plain and self._slash_commands:
             self._prompt_session = _build_prompt_session(self._slash_commands)
+        if not self.plain:
+            self._control_prompt_session = _build_control_prompt_session()
 
     # -- session chrome ---------------------------------------------------------------------------
 
@@ -220,7 +243,20 @@ class ConsoleRenderer:
         prompt = f"{label}{suffix} › "
         if self.plain or self._console is None:
             value = input(prompt)
+            if value == "\x1b":
+                raise BackRequested
         else:
+            if self._control_prompt_session is not None:
+                try:
+                    value = str(self._control_prompt_session.prompt(prompt))
+                except BackRequested:
+                    raise
+                except (EOFError, KeyboardInterrupt):
+                    raise
+                except Exception:  # noqa: BLE001 - if prompt_toolkit has a terminal issue, fall back to input.
+                    self._control_prompt_session = None
+                else:
+                    return default if value == "" and default is not None else value
             self._console.print(prompt, style=_USER, end="")
             value = input()
         return default if value == "" and default is not None else value

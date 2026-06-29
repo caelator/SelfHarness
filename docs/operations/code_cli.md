@@ -75,6 +75,11 @@ Ctrl-C behavior:
 - During a running turn: interrupts the turn and returns to the prompt. The interrupted turn is not
   recorded as a completed model turn.
 
+Esc behavior:
+
+- In nested menus: returns one step up, such as model list -> provider list or effort picker -> model list.
+- At the top of a menu: returns to the chat prompt.
+
 Exit commands:
 
 ```text

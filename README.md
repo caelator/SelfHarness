@@ -689,6 +689,7 @@ palette reaches the same controls as the slash commands:
 /reset                        clear current thread history
 /exit, /quit, /q, :q           leave the CLI
 Ctrl-C                        at prompt: exit; during a turn: interrupt and return to prompt
+Esc                           in menus: go back one step
 ```
 
 When `/model` or `/provider` opens the provider picker, the next screen queries

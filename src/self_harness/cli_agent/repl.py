@@ -20,7 +20,7 @@ from self_harness.cli_agent.context import expand_mentions
 from self_harness.cli_agent.model_discovery import ModelCatalog, discover_provider_models
 from self_harness.cli_agent.session import HeadlessCliSession, InteractiveSession, headless_binary_for_backend
 from self_harness.cli_agent.sessions import SessionRecord, list_sessions, load_session, save_session
-from self_harness.cli_agent.ui import ConsoleRenderer
+from self_harness.cli_agent.ui import BackRequested, ConsoleRenderer
 from self_harness.exceptions import AgenticRunnerError
 
 CodeSession = InteractiveSession | HeadlessCliSession
@@ -395,7 +395,10 @@ def _command_palette(
         ],
         footer="Type a number, or press Enter to cancel.",
     )
-    choice = renderer.ask("command").strip().lower()
+    try:
+        choice = renderer.ask("command").strip().lower()
+    except BackRequested:
+        return session, record, False
     if not choice:
         return session, record, False
     if choice in {"1", "model", "m"}:
@@ -465,7 +468,10 @@ def _handle_provider_command(session: CodeSession, raw: str, renderer: ConsoleRe
 
 def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRenderer) -> CodeSession:
     if not raw:
-        picked = _effort_picker(session, renderer)
+        try:
+            picked = _effort_picker(session, renderer)
+        except BackRequested:
+            return session
         if picked is None:
             renderer.info(_model_status(session))
             return session
@@ -487,72 +493,96 @@ def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRend
 
 
 def _model_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSession:
-    current_provider = _provider(session)
-    renderer.menu(
-        "Model / Provider",
-        [
-            ("1", f"Codex headless CLI{' (current)' if current_provider == 'codex' else ''}"),
-            ("2", f"Agy headless CLI{' (current)' if current_provider == 'agy' else ''}"),
-            ("3", f"Claude headless CLI{' (current)' if current_provider == 'claude' else ''}"),
-            ("4", f"GLM via Z.ai{' (current)' if current_provider == 'glm' else ''}"),
-            ("0", "Cancel"),
-        ],
-        footer=_model_status(session),
-    )
-    choice = renderer.ask("provider").strip().lower()
-    if not choice or choice == "0":
-        return session
-    mapping = {"1": "codex", "2": "agy", "3": "claude", "4": "glm"}
-    if choice in mapping:
-        provider = mapping[choice]
-    else:
+    while True:
+        current_provider = _provider(session)
+        renderer.menu(
+            "Model / Provider",
+            [
+                ("1", f"Codex headless CLI{' (current)' if current_provider == 'codex' else ''}"),
+                ("2", f"Agy headless CLI{' (current)' if current_provider == 'agy' else ''}"),
+                ("3", f"Claude headless CLI{' (current)' if current_provider == 'claude' else ''}"),
+                ("4", f"GLM via Z.ai{' (current)' if current_provider == 'glm' else ''}"),
+                ("0", "Cancel"),
+            ],
+            footer=_model_status(session),
+        )
         try:
-            provider = _normalize_provider(choice)
-        except ValueError as exc:
-            renderer.error(f"  ! {exc}")
+            choice = renderer.ask("provider").strip().lower()
+        except BackRequested:
             return session
-    selected_model, model_cancelled = _model_picker(provider, session, renderer)
-    if model_cancelled:
-        return session
-    model = selected_model
-    effort = getattr(session, "effort", None)
-    if provider in {"codex", "claude"}:
-        selected_effort = _effort_picker(session, renderer, current=effort)
-        effort = selected_effort or effort
-    elif provider == "agy":
-        renderer.info("Agy exposes model selection; no effort flag is advertised by this install.")
-        effort = None
-    selected = _switch_code_backend(session, provider=provider, model=model, effort=effort, renderer=renderer)
-    _persist_code_selection(selected)
-    renderer.info(_model_status(selected))
-    return selected
+        if not choice or choice == "0":
+            return session
+        mapping = {"1": "codex", "2": "agy", "3": "claude", "4": "glm"}
+        if choice in mapping:
+            provider = mapping[choice]
+        else:
+            try:
+                provider = _normalize_provider(choice)
+            except ValueError as exc:
+                renderer.error(f"  ! {exc}")
+                continue
+        selected = _model_palette_for_provider(session, provider, renderer)
+        if selected is not None:
+            return selected
+
+
+def _model_palette_for_provider(
+    session: CodeSession,
+    provider: str,
+    renderer: ConsoleRenderer,
+) -> CodeSession | None:
+    while True:
+        try:
+            selected_model, model_cancelled = _model_picker(provider, session, renderer)
+        except BackRequested:
+            return None
+        if model_cancelled:
+            return session
+        model = selected_model
+        effort = getattr(session, "effort", None)
+        if provider in {"codex", "claude"}:
+            try:
+                selected_effort = _effort_picker(session, renderer, current=effort)
+            except BackRequested:
+                continue
+            effort = selected_effort or effort
+        elif provider == "agy":
+            renderer.info("Agy exposes model selection; no effort flag is advertised by this install.")
+            effort = None
+        selected = _switch_code_backend(session, provider=provider, model=model, effort=effort, renderer=renderer)
+        _persist_code_selection(selected)
+        renderer.info(_model_status(selected))
+        return selected
 
 
 def _model_picker(provider: str, session: CodeSession, renderer: ConsoleRenderer) -> tuple[str | None, bool]:
     current_model = getattr(session, "model", None) if _provider(session) == provider else None
     binary = headless_binary_for_backend(provider) if provider in {"codex", "agy", "claude"} else None
     catalog = discover_provider_models(provider, binary=binary)
-    options, model_by_choice = _model_options(catalog, current_model=current_model)
-    renderer.menu(
-        f"{provider.upper()} Models",
-        options,
-        footer=_model_picker_footer(catalog, current_model=current_model),
-    )
-    choice = renderer.ask("model").strip()
-    if not choice:
-        return None, False
-    lowered = choice.lower()
-    if lowered == "0":
-        return None, True
-    if lowered in {"d", "default"}:
-        return None, False
-    if lowered in {"c", "custom"}:
-        value = renderer.ask("custom model id").strip()
-        return (value or None), False
-    if choice in model_by_choice:
-        return model_by_choice[choice], False
-    renderer.error(f"  ! unknown model choice: {choice}")
-    return None, True
+    while True:
+        options, model_by_choice = _model_options(catalog, current_model=current_model)
+        renderer.menu(
+            f"{provider.upper()} Models",
+            options,
+            footer=_model_picker_footer(catalog, current_model=current_model),
+        )
+        choice = renderer.ask("model").strip()
+        if not choice:
+            return None, False
+        lowered = choice.lower()
+        if lowered == "0":
+            return None, True
+        if lowered in {"d", "default"}:
+            return None, False
+        if lowered in {"c", "custom"}:
+            try:
+                value = renderer.ask("custom model id").strip()
+            except BackRequested:
+                continue
+            return (value or None), False
+        if choice in model_by_choice:
+            return model_by_choice[choice], False
+        renderer.error(f"  ! unknown model choice: {choice}")
 
 
 def _model_options(
@@ -855,7 +885,10 @@ def _thread_palette(
         options.append((str(idx), f"{item.id}  ·  {marker}{len(item.turns)} turn(s)  ·  {item.updated_at or '?'}"))
     options.append(("0", "Cancel"))
     renderer.menu("Threads", options, footer="Pick a thread number, n for new, or Enter to cancel.")
-    choice = renderer.ask("thread").strip()
+    try:
+        choice = renderer.ask("thread").strip()
+    except BackRequested:
+        return session, record
     if not choice or choice == "0":
         return session, record
     if choice.lower() in {"n", "new"}:
@@ -912,54 +945,67 @@ def _save_current_thread(session: CodeSession, record: SessionRecord, root: Path
 
 
 def _config_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSession:
-    cfg = user_config.load_config()
-    renderer.menu(
-        "Runtime Config",
-        [
-            ("1", f"Max steps per turn: {session.max_steps}"),
-            ("2", f"Tool timeout seconds: {session.tool_timeout_seconds}"),
-            ("3", f"Harvest failures: {'on' if session.harvester.enabled else 'off'}"),
-            ("4", "Model/provider/effort"),
-            ("5", f"Config path: {cfg.path}"),
-            ("0", "Cancel"),
-        ],
-        footer="Changes apply immediately to this session and are saved as defaults.",
-    )
-    choice = renderer.ask("config").strip().lower()
-    if choice in {"", "0"}:
-        return session
-    if choice == "1":
-        value = renderer.ask("max steps", default=str(session.max_steps)).strip()
-        try:
-            session.max_steps = max(1, int(value))
-        except ValueError:
-            renderer.error("  ! max steps must be an integer")
-            return session
-        cfg.set("max_steps", session.max_steps)
-    elif choice == "2":
-        value = renderer.ask("tool timeout seconds", default=str(session.tool_timeout_seconds)).strip()
-        try:
-            session.tool_timeout_seconds = max(1, int(value))
-        except ValueError:
-            renderer.error("  ! tool timeout must be an integer")
-            return session
-        cfg.set("tool_timeout_seconds", session.tool_timeout_seconds)
-    elif choice == "3":
-        session.harvester.enabled = not session.harvester.enabled
-        cfg.set("harvest", session.harvester.enabled)
-        renderer.info(f"harvest {'on' if session.harvester.enabled else 'off'}")
-    elif choice == "4":
-        session = _model_palette(session, renderer)
+    while True:
         cfg = user_config.load_config()
-    elif choice == "5":
-        renderer.info(str(cfg.path))
+        renderer.menu(
+            "Runtime Config",
+            [
+                ("1", f"Max steps per turn: {session.max_steps}"),
+                ("2", f"Tool timeout seconds: {session.tool_timeout_seconds}"),
+                ("3", f"Harvest failures: {'on' if session.harvester.enabled else 'off'}"),
+                ("4", "Model/provider/effort"),
+                ("5", f"Config path: {cfg.path}"),
+                ("0", "Cancel"),
+            ],
+            footer="Changes apply immediately to this session and are saved as defaults.",
+        )
+        try:
+            choice = renderer.ask("config").strip().lower()
+        except BackRequested:
+            return session
+        if choice in {"", "0"}:
+            return session
+        if choice == "1":
+            try:
+                value = renderer.ask("max steps", default=str(session.max_steps)).strip()
+            except BackRequested:
+                continue
+            try:
+                session.max_steps = max(1, int(value))
+            except ValueError:
+                renderer.error("  ! max steps must be an integer")
+                continue
+            cfg.set("max_steps", session.max_steps)
+        elif choice == "2":
+            try:
+                value = renderer.ask("tool timeout seconds", default=str(session.tool_timeout_seconds)).strip()
+            except BackRequested:
+                continue
+            try:
+                session.tool_timeout_seconds = max(1, int(value))
+            except ValueError:
+                renderer.error("  ! tool timeout must be an integer")
+                continue
+            cfg.set("tool_timeout_seconds", session.tool_timeout_seconds)
+        elif choice == "3":
+            session.harvester.enabled = not session.harvester.enabled
+            cfg.set("harvest", session.harvester.enabled)
+            renderer.info(f"harvest {'on' if session.harvester.enabled else 'off'}")
+        elif choice == "4":
+            before_model_status = _model_status(session)
+            session = _model_palette(session, renderer)
+            cfg = user_config.load_config()
+            if _model_status(session) == before_model_status:
+                continue
+        elif choice == "5":
+            renderer.info(str(cfg.path))
+            continue
+        else:
+            renderer.info(f"unknown config choice: {choice}")
+            continue
+        cfg.save()
+        renderer.info(_status_text(session, None, None))
         return session
-    else:
-        renderer.info(f"unknown config choice: {choice}")
-        return session
-    cfg.save()
-    renderer.info(_status_text(session, None, None))
-    return session
 
 
 def _status_text(session: CodeSession, record: SessionRecord | None, root: Path | None) -> str:
@@ -1004,7 +1050,10 @@ def _show_harvested(session: CodeSession, renderer: ConsoleRenderer) -> None:
 
 
 def _confirm(renderer: ConsoleRenderer, question: str) -> bool:
-    return renderer.ask(f"{question} Type yes to confirm").strip().lower() in {"y", "yes"}
+    try:
+        return renderer.ask(f"{question} Type yes to confirm").strip().lower() in {"y", "yes"}
+    except BackRequested:
+        return False
 
 
 def _now_stamp() -> str:
