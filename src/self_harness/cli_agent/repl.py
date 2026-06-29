@@ -60,6 +60,8 @@ _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/threads", "open the thread picker"),
     ("/thread", "thread actions: list, new, switch"),
     ("/sessions", "list saved sessions"),
+    ("/whoami", "show active provider and configured model"),
+    ("/identity", "show active provider and configured model"),
     ("/status", "show runtime status"),
     ("/config", "edit runtime settings"),
     ("/history", "show recent turns"),
@@ -83,6 +85,7 @@ Commands:
   /provider    switch provider: /provider codex|agy|claude|glm
   /effort      open/set effort for Codex or Claude
   /threads     open thread picker; /thread new; /thread switch <id-or-number>
+  /whoami      show active provider, model, effort, and transport
   /status      show cwd, thread, harness, model, and runtime controls
   /config      open runtime settings picker
   /history     show recent turns
@@ -173,6 +176,9 @@ def run_repl(
         if _is_threads_command(line):
             session, record = _handle_thread_command(session, record, line, renderer, root)
             renderer.assistant_label = _assistant_label(session)
+            continue
+        if line in {"/whoami", "/identity"} or _is_identity_query(line):
+            renderer.info(_identity_text(session))
             continue
         if line == "/status":
             renderer.info(_status_text(session, record, root))
@@ -367,6 +373,26 @@ def _is_threads_command(line: str) -> bool:
     )
 
 
+def _is_identity_query(line: str) -> bool:
+    normalized = line.strip().lower().rstrip(" ?!.")
+    return normalized in {
+        "whoami",
+        "who are you",
+        "what model are you",
+        "what model are you using",
+        "which model are you",
+        "which model are you using",
+        "what model am i using",
+        "which model am i using",
+        "what model are we using",
+        "which model are we using",
+        "what provider are you using",
+        "which provider are you using",
+        "what backend are you using",
+        "which backend are you using",
+    }
+
+
 def _command_palette(
     session: CodeSession,
     record: SessionRecord,
@@ -378,15 +404,16 @@ def _command_palette(
         [
             ("1", "Model/provider/effort"),
             ("2", "Threads"),
-            ("3", "Status"),
-            ("4", "Runtime config"),
-            ("5", "History"),
-            ("6", "Harness"),
-            ("7", "Harvested failures"),
-            ("8", "Save current thread"),
-            ("9", "Clear screen"),
-            ("10", "Reset current thread"),
-            ("11", "Help"),
+            ("3", "Identity"),
+            ("4", "Status"),
+            ("5", "Runtime config"),
+            ("6", "History"),
+            ("7", "Harness"),
+            ("8", "Harvested failures"),
+            ("9", "Save current thread"),
+            ("10", "Clear screen"),
+            ("11", "Reset current thread"),
+            ("12", "Help"),
             ("0", "Exit SelfHarness Code"),
         ],
         footer="Type a number, or press Enter to cancel.",
@@ -401,31 +428,33 @@ def _command_palette(
         session = _model_palette(session, renderer)
     elif choice in {"2", "threads", "thread", "t"}:
         session, record = _thread_palette(session, record, renderer, root)
-    elif choice in {"3", "status", "s"}:
+    elif choice in {"3", "identity", "whoami", "i"}:
+        renderer.info(_identity_text(session))
+    elif choice in {"4", "status", "s"}:
         renderer.info(_status_text(session, record, root))
-    elif choice in {"4", "config", "settings", "c"}:
+    elif choice in {"5", "config", "settings", "c"}:
         session = _config_palette(session, renderer)
-    elif choice in {"5", "history"}:
+    elif choice in {"6", "history"}:
         _show_history(record, renderer, "/history")
-    elif choice in {"6", "harness"}:
+    elif choice in {"7", "harness"}:
         lineage = "evolving lineage" if session.evolving else "initial_harness() (Figure 3)"
         renderer.info(f"harness {session.harness_hash} ({lineage})")
-    elif choice in {"7", "harvested"}:
+    elif choice in {"8", "harvested"}:
         _show_harvested(session, renderer)
-    elif choice in {"8", "save"}:
+    elif choice in {"9", "save"}:
         record.history[:] = list(session.history)
         _save(record, root)
         renderer.info(f"saved thread {record.id}")
-    elif choice in {"9", "clear"}:
+    elif choice in {"10", "clear"}:
         renderer.clear()
-    elif choice in {"10", "reset"}:
+    elif choice in {"11", "reset"}:
         if _confirm(renderer, "Clear current thread history?"):
             session.reset()
             record.history.clear()
             record.turns.clear()
             _save(record, root)
             renderer.info("(history cleared)")
-    elif choice in {"11", "help", "?"}:
+    elif choice in {"12", "help", "?"}:
         renderer.info(_HELP)
     elif choice in {"0", "exit", "quit", "q"}:
         return session, record, True
@@ -787,11 +816,26 @@ def _persist_code_selection(
 def _model_status(session: CodeSession) -> str:
     provider = _provider(session)
     model = getattr(session, "model", None) or ("provider default" if provider != "glm" else DEFAULT_GLM_MODEL)
-    effort = getattr(session, "effort", None) or "provider default"
+    raw_effort = getattr(session, "effort", None)
+    valid_effort = valid_effort_or_none(provider, raw_effort)
+    if raw_effort and valid_effort is None:
+        effort = f"provider default (ignored invalid: {raw_effort})"
+    else:
+        effort = valid_effort or "provider default"
     binary = getattr(session, "binary", None)
     binary_text = f", binary: {binary}" if isinstance(binary, str) and binary else ""
     effort_note = " (not used by agy)" if provider == "agy" and effort != "provider default" else ""
     return f"provider: {provider}, model: {model}, effort: {effort}{effort_note}{binary_text}"
+
+
+def _identity_text(session: CodeSession) -> str:
+    provider = _provider(session)
+    if provider == "glm":
+        transport = "Z.ai Anthropic-compatible Messages API"
+    else:
+        binary = getattr(session, "binary", None) or provider
+        transport = f"{provider} headless CLI ({binary})"
+    return f"SelfHarness Code is using {_model_status(session)}\ntransport: {transport}"
 
 
 def _provider(session: CodeSession) -> str:

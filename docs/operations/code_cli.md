@@ -66,12 +66,17 @@ active backend object. It does not restart the terminal.
 
 ```text
 /config      edit max steps, tool timeout, harvesting, or model/provider
+/whoami      show active provider, configured model, effort, and transport
 /status      show cwd, session store, thread id, harness hash, provider/model, and budgets
 /history     show recent turns
 /save        write the current thread now
 /clear       clear the terminal
 /reset       clear current thread history
 ```
+
+The exact identity questions `what model are you`, `what model are you using`, and related
+provider/backend variants are answered locally by the control plane. This keeps the reported
+provider/model tied to the active SelfHarness configuration rather than a model's self-description.
 
 Ctrl-C behavior:
 

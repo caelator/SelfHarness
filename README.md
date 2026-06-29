@@ -682,6 +682,7 @@ palette reaches the same controls as the slash commands:
 /thread new                   start a clean conversation thread
 /thread switch <id-or-number> switch to a saved thread without leaving the CLI
 /config                       runtime settings picker
+/whoami                       show active provider, model, effort, and transport
 /status                       show cwd, thread, harness, provider/model, harvest, budgets
 /history [n]                  show recent turns
 /save                         persist current thread immediately
@@ -699,6 +700,11 @@ Z.ai's live coding-plan `/models` endpoint; Codex reads the server-provided
 Codex model cache and can fall back to OpenAI `/v1/models`; Claude uses the
 Anthropic model API when `ANTHROPIC_API_KEY` is available. If a catalog cannot
 be queried, the picker says why and offers a custom model id.
+
+The exact identity questions `what model are you`, `what model are you using`,
+and related provider/backend variants are answered locally by the control plane
+so the reported model comes from SelfHarness configuration, not model
+self-description.
 
 Reasoning effort is provider-scoped. Codex supports `none`, `minimal`, `low`,
 `medium`, `high`, and `xhigh`; Claude supports `low`, `medium`, `high`,

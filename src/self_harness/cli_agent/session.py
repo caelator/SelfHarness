@@ -169,7 +169,7 @@ class InteractiveSession:
 
         loop = run_agent_loop(
             transport=transport,
-            system_prompt=render_system_prompt(self.harness),
+            system_prompt=_interactive_system_prompt(self.harness, self.model),
             task_prompt=user_text,
             workdir=self.workdir,
             env=dict(os.environ),
@@ -261,7 +261,15 @@ class HeadlessCliSession:
             try:
                 completed = subprocess.run(
                     command,
-                    input=_headless_prompt(self.harness, self.history, user_text),
+                    input=_headless_prompt(
+                        self.harness,
+                        self.history,
+                        user_text,
+                        backend=backend,
+                        model=self.model,
+                        effort=self.effort,
+                        binary=self.binary,
+                    ),
                     cwd=self.workdir,
                     env=dict(os.environ),
                     capture_output=True,
@@ -440,9 +448,55 @@ def _headless_effort_override(backend: str) -> str | None:
     return os.environ.get("SELF_HARNESS_HEADLESS_EFFORT")
 
 
-def _headless_prompt(harness: HarnessSpec, history: list[dict[str, Any]], user_text: str) -> str:
+def _interactive_system_prompt(harness: HarnessSpec, model: str) -> str:
+    return "\n\n".join(
+        [
+            _runtime_identity_instructions(provider="glm", model=model),
+            render_system_prompt(harness),
+        ]
+    )
+
+
+def _runtime_identity_instructions(
+    *,
+    provider: str,
+    model: str | None,
+    effort: str | None = None,
+    binary: str | None = None,
+) -> str:
+    provider_label = {
+        "glm": "GLM via Z.ai",
+        "codex": "Codex headless CLI",
+        "agy": "Agy headless CLI",
+        "claude": "Claude headless CLI",
+    }.get(provider, provider)
+    model_text = model or (DEFAULT_GLM_MODEL if provider == "glm" else "provider default")
+    effort_text = effort or "provider default"
+    binary_line = f"\n- Headless binary: {binary}" if binary else ""
+    return (
+        "Runtime identity:\n"
+        f"- SelfHarness Code provider: {provider_label}.\n"
+        f"- Configured model id: {model_text}.\n"
+        f"- Configured reasoning effort: {effort_text}."
+        f"{binary_line}\n"
+        "- If the user asks what model, provider, or backend is being used, answer from this runtime "
+        "identity. Do not infer identity from the API protocol or compatibility layer."
+    )
+
+
+def _headless_prompt(
+    harness: HarnessSpec,
+    history: list[dict[str, Any]],
+    user_text: str,
+    *,
+    backend: str,
+    model: str | None,
+    effort: str | None,
+    binary: str,
+) -> str:
     parts = [
         "You are running as the SelfHarness coding agent in the current working directory.",
+        _runtime_identity_instructions(provider=backend, model=model, effort=effort, binary=binary),
         "Follow this active harness exactly:",
         render_system_prompt(harness),
     ]

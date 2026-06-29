@@ -20,6 +20,7 @@ class ScriptedTransport:
     def __init__(self, turns: list[MessagesTurn]) -> None:
         self._turns = list(turns)
         self.calls: list[list[dict[str, Any]]] = []
+        self.systems: list[str] = []
 
     def create_message(
         self,
@@ -29,6 +30,7 @@ class ScriptedTransport:
         tools: Sequence[Mapping[str, Any]],
         max_tokens: int,
     ) -> MessagesTurn:
+        self.systems.append(system)
         self.calls.append([dict(m) for m in messages])
         return self._turns.pop(0)
 
@@ -165,6 +167,25 @@ def test_session_multi_turn_and_reset(tmp_path: Path) -> None:
     assert session.history == []
 
 
+def test_interactive_session_system_prompt_includes_glm_identity(tmp_path: Path) -> None:
+    transport = ScriptedTransport([_end("identity noted")])
+    session = InteractiveSession(
+        api_key="k",
+        base_url="https://api.z.ai/api/anthropic",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        model="glm-5.2",
+    )
+    session._transport = transport
+
+    session.send("what model are you")
+
+    assert "SelfHarness Code provider: GLM via Z.ai." in transport.systems[-1]
+    assert "Configured model id: glm-5.2." in transport.systems[-1]
+    assert "Do not infer identity from the API protocol or compatibility layer." in transport.systems[-1]
+
+
 def test_session_harvests_failing_command(tmp_path: Path) -> None:
     # Use a command that is in the check allowlist AND deterministically fails (exit 1) in any environment.
     transport = ScriptedTransport([_bash("python3 -c 'import sys; sys.exit(1)'"), _end("fixed it")])
@@ -233,7 +254,11 @@ printf '%s\\n' '{"type":"turn.completed","usage":{"total_tokens":7}}'
     assert result.final_text == "codex fixed it"
     assert result.usage == {"total_tokens": 7}
     assert [m["role"] for m in session.history] == ["user", "assistant"]
-    assert "Current user request:\n\nfix it" in (tmp_path / "prompt.txt").read_text(encoding="utf-8")
+    prompt = (tmp_path / "prompt.txt").read_text(encoding="utf-8")
+    assert "Current user request:\n\nfix it" in prompt
+    assert "SelfHarness Code provider: Codex headless CLI." in prompt
+    assert "Configured model id: gpt-5.6." in prompt
+    assert "Headless binary:" in prompt
     args = (tmp_path / "args.txt").read_text(encoding="utf-8")
     assert "--model" in args
     assert "gpt-5.6" in args
@@ -357,6 +382,44 @@ printf '%s' "model command ok" > "$out"
     assert cfg.get("code_provider") == "codex"
     assert cfg.get("code_model") == "gpt-5.6"
     assert cfg.get("code_effort") == "xhigh"
+
+
+def test_repl_identity_question_is_answered_locally(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    lines = iter(["what model are you", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = InteractiveSession(
+        api_key="k",
+        base_url="https://api.z.ai/api/anthropic",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        model="glm-5.2",
+    )
+
+    assert run_repl(session, banner=False, root=None, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "provider: glm, model: glm-5.2, effort: provider default" in out
+    assert "transport: Z.ai Anthropic-compatible Messages API" in out
+    assert "glm ›" not in out
+
+
+def test_model_status_ignores_stale_invalid_effort(tmp_path: Path) -> None:
+    from self_harness.cli_agent import repl
+
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        effort="max",
+    )
+
+    assert (
+        repl._model_status(session)
+        == "provider: codex, model: provider default, effort: provider default (ignored invalid: max), binary: codex"
+    )
 
 
 class ScriptedRenderer:
