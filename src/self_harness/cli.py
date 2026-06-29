@@ -163,6 +163,30 @@ DEFAULT_CODE_MAX_STEPS = 80
 # averages out that noise AND gives the strict acceptance gate graded resolution (a task going 1/3→3/3 is
 # a real +2, not a tie), so it raises recall WITHOUT weakening precision. 3 is a good cost/signal balance.
 DEFAULT_LOOP_EVAL_REPEATS = 3
+HEADLESS_CODE_MODELS = {
+    "codex": "codex",
+    "codex-cli": "codex",
+    "agy": "agy",
+    "agy-cli": "agy",
+    "claude": "claude",
+    "claude-cli": "claude",
+    "claude-code": "claude",
+}
+
+
+def _headless_backend_for_model(model: str) -> str | None:
+    normalized = model.strip().lower().replace("_", "-")
+    return HEADLESS_CODE_MODELS.get(normalized)
+
+
+def _headless_binary_for_backend(backend: str) -> str:
+    specific = os.environ.get(f"SELF_HARNESS_{backend.upper()}_BINARY")
+    if specific:
+        return specific
+    generic = os.environ.get("SELF_HARNESS_HEADLESS_BINARY")
+    if generic:
+        return generic
+    return backend
 
 
 def run_code_default() -> int:
@@ -299,8 +323,11 @@ def run_loop_default(*, rounds: int = 1, seed: int = 0, eval_repeats: int | None
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="self-harness",
-        description="SelfHarness — a GLM 5.2 coding agent that improves its own harness. "
-        "Run with no command for an interactive menu, or `self-harness help` for a guide.",
+        description=(
+            "SelfHarness — a coding agent that improves its own harness. "
+            "Use GLM 5.2 or a headless local CLI backend (codex, agy, claude). "
+            "Run with no command for an interactive menu, or `self-harness help` for a guide."
+        ),
     )
     # Subcommand is OPTIONAL: bare `self-harness` opens the interactive home menu.
     subparsers = parser.add_subparsers(dest="command", required=False)
@@ -311,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
     help_parser.add_argument("topic", nargs="?", default=None, help="overview, code, loop, settings, key, ...")
 
     settings_parser = subparsers.add_parser(
-        "settings", help="view or change configuration, including the GLM 5.2 API key"
+        "settings", help="view or change configuration, including model/backend settings and API keys"
     )
     settings_parser.add_argument(
         "settings_args",
@@ -448,7 +475,10 @@ def main(argv: list[str] | None = None) -> int:
 
     code_parser = subparsers.add_parser(
         "code",
-        help="interactive GLM 5.2 coding agent in the current directory (auto-runs tools; harvests failures)",
+        help=(
+            "interactive coding agent in the current directory; settings model can be glm-5.2, "
+            "codex, agy, or claude"
+        ),
     )
     code_parser.add_argument(
         "--root",
@@ -1851,17 +1881,18 @@ def _run_code(
     plain: bool = False,
     local_harness: bool = False,
 ) -> int:
-    """Launch the interactive GLM 5.2 coding agent (`self-harness code`)."""
+    """Launch the interactive coding agent (`self-harness code`)."""
 
     import uuid
     from datetime import UTC, datetime
 
+    from self_harness import user_config
     from self_harness.agentic_session import (
         HOST_EXEC_WARNING_LINES,
         resolve_zai_api_key,
         resolve_zai_base_url,
     )
-    from self_harness.cli_agent import FailureHarvester, InteractiveSession, run_repl
+    from self_harness.cli_agent import FailureHarvester, HeadlessCliSession, InteractiveSession, run_repl
     from self_harness.cli_agent.session import load_session_harness
     from self_harness.cli_agent.sessions import latest_session, load_session
     from self_harness.exceptions import AgenticRunnerError
@@ -1878,15 +1909,32 @@ def _run_code(
     state_path = (harness_state or default_state).resolve()
     inbox = (inbox_dir or default_inbox).resolve()
 
-    try:
-        api_key = resolve_zai_api_key()
-    except AgenticRunnerError as exc:
-        print(f"error: {exc}")
-        return 2
-    base_url = resolve_zai_base_url()
+    cfg = user_config.load_config()
+    provider = user_config.resolve_code_provider(config=cfg)
+    model = user_config.resolve_code_model(provider=provider, config=cfg)
+    effort = user_config.resolve_code_effort(provider=provider, config=cfg)
+    headless_backend = None if provider == "glm" else _headless_backend_for_model(provider)
+    api_key = ""
+    base_url = ""
+    if headless_backend is None:
+        try:
+            api_key = resolve_zai_api_key()
+        except AgenticRunnerError as exc:
+            print(f"error: {exc}")
+            return 2
+        base_url = resolve_zai_base_url()
 
     for line in HOST_EXEC_WARNING_LINES:
         print(line)
+    if headless_backend is not None:
+        model_text = model or "provider default"
+        effort_text = effort or "provider default"
+        print(
+            f"main coding backend: {headless_backend} headless CLI "
+            f"({_headless_binary_for_backend(headless_backend)}), model: {model_text}, effort: {effort_text}"
+        )
+    else:
+        print(f"main coding backend: GLM via Z.ai ({model or user_config.DEFAULT_MODEL})")
     print()
 
     # Resolve a session to resume (explicit id, or most recent), or mint a fresh one.
@@ -1905,18 +1953,36 @@ def _run_code(
 
     harness, evolving = load_session_harness(state_path)
     harvester = FailureHarvester(inbox_dir=inbox, workdir=workdir, enabled=harvest)
-    session = InteractiveSession(
-        api_key=api_key,
-        base_url=base_url,
-        workdir=workdir,
-        harness=harness,
-        harvester=harvester,
-        max_steps=max_steps,
-        tool_timeout_seconds=tool_timeout_seconds,
-        evolving=evolving,
-        history=list(resumed.history) if resumed is not None else [],
-        turn_index=len(resumed.turns) if resumed is not None else 0,
-    )
+    session: HeadlessCliSession | InteractiveSession
+    if headless_backend is not None:
+        session = HeadlessCliSession(
+            backend=headless_backend,
+            binary=_headless_binary_for_backend(headless_backend),
+            workdir=workdir,
+            harness=harness,
+            harvester=harvester,
+            model=model,
+            effort=effort,
+            max_steps=max_steps,
+            tool_timeout_seconds=tool_timeout_seconds,
+            evolving=evolving,
+            history=list(resumed.history) if resumed is not None else [],
+            turn_index=len(resumed.turns) if resumed is not None else 0,
+        )
+    else:
+        session = InteractiveSession(
+            api_key=api_key,
+            base_url=base_url,
+            workdir=workdir,
+            harness=harness,
+            harvester=harvester,
+            model=model or user_config.DEFAULT_MODEL,
+            max_steps=max_steps,
+            tool_timeout_seconds=tool_timeout_seconds,
+            evolving=evolving,
+            history=list(resumed.history) if resumed is not None else [],
+            turn_index=len(resumed.turns) if resumed is not None else 0,
+        )
     if resumed is not None:
         harvester.seed_written(resumed.harvested)
         print(f"resumed session {session_id} ({len(resumed.turns)} prior turn(s))")

@@ -8,29 +8,73 @@ harvesting (the self-improvement flywheel) are unchanged from Phase 1.
 
 from __future__ import annotations
 
+import shlex
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from self_harness import user_config
+from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
+from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
 from self_harness.cli_agent.context import expand_mentions
-from self_harness.cli_agent.session import InteractiveSession
-from self_harness.cli_agent.sessions import SessionRecord, list_sessions, save_session
+from self_harness.cli_agent.session import HeadlessCliSession, InteractiveSession, headless_binary_for_backend
+from self_harness.cli_agent.sessions import SessionRecord, list_sessions, load_session, save_session
 from self_harness.cli_agent.ui import ConsoleRenderer
+from self_harness.exceptions import AgenticRunnerError
+
+CodeSession = InteractiveSession | HeadlessCliSession
+
+_PROVIDER_ALIASES = {
+    "codex": "codex",
+    "codex-cli": "codex",
+    "agy": "agy",
+    "agy-cli": "agy",
+    "claude": "claude",
+    "claude-cli": "claude",
+    "claude-code": "claude",
+    "glm": "glm",
+    "glm-5": "glm",
+    "glm-5.2": "glm",
+    "zai": "glm",
+    "z.ai": "glm",
+}
+_EFFORT_ALIASES = {
+    "low": "low",
+    "medium": "medium",
+    "med": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "x-high": "xhigh",
+    "extra-high": "xhigh",
+    "extra_high": "xhigh",
+    "extra high": "xhigh",
+    "max": "max",
+}
 
 _HELP = """\
 Commands:
-  /help        show this help
-  /harness     show the active harness (hash + whether it is the evolving lineage)
-  /harvested   list failure bundles harvested this session (fed to the improvement loop)
-  /sessions    list saved sessions you can resume (self-harness code --resume <id>)
-  /cwd         show the working directory
-  /reset       clear the conversation history
-  /exit /quit  leave (or Ctrl-D)
+  /menu        open the TUI command palette
+  /model       open model/provider picker, or set directly: /model codex gpt-5.6 xhigh
+  /provider    switch provider: /provider codex|agy|claude|glm
+  /effort      open/set effort: /effort low|medium|high|xhigh|max
+  /threads     open thread picker; /thread new; /thread switch <id-or-number>
+  /status      show cwd, thread, harness, model, and runtime controls
+  /config      open runtime settings picker
+  /history     show recent turns
+  /harness     show the active harness
+  /harvested   list harvested failure bundles
+  /sessions    list saved sessions you can resume (alias for /threads list)
+  /clear       clear the terminal
+  /reset       clear the current thread history
+  /save        save the current thread now
+  /stop        during a running turn, press Ctrl-C; at the prompt this is a no-op
+  /exit /quit  leave (or Ctrl-D, Ctrl-C at the prompt)
 Mention @path/to/file to inline that file's contents into your message.
-Anything else is sent to GLM 5.2, which acts in the working directory with bash/read/write tools."""
+Anything else is sent to the configured coding backend, which acts in the working directory."""
 
 
 def run_repl(
-    session: InteractiveSession,
+    session: CodeSession,
     *,
     banner: bool = True,
     root: Path | None = None,
@@ -45,7 +89,7 @@ def run_repl(
     record. ``plain`` forces the plain-text renderer.
     """
 
-    renderer = ConsoleRenderer(plain=plain)
+    renderer = ConsoleRenderer(plain=plain, assistant_label=_assistant_label(session))
     record = SessionRecord(
         id=session_id,
         workdir=str(session.workdir),
@@ -62,6 +106,7 @@ def run_repl(
             harness_hash=session.harness_hash,
             lineage=lineage,
             harvest=harvest,
+            agent_label=_agent_label(session),
         )
 
     while True:
@@ -73,16 +118,67 @@ def run_repl(
 
         if not line:
             continue
-        if line in {"/exit", "/quit"}:
+        if _is_exit_command(line):
             break
         if line == "/help":
             renderer.info(_HELP)
+            continue
+        if line in {"/menu", "/commands", "/palette", "/"}:
+            session, record, exit_requested = _command_palette(session, record, renderer, root)
+            renderer.assistant_label = _assistant_label(session)
+            if exit_requested:
+                break
+            continue
+        if line == "/model" or line.startswith("/model "):
+            session = _handle_model_command(session, line.removeprefix("/model").strip(), renderer)
+            renderer.assistant_label = _assistant_label(session)
+            record.history[:] = list(session.history)
+            continue
+        if line == "/provider" or line.startswith("/provider ") or line == "/backend" or line.startswith("/backend "):
+            command = line.split(maxsplit=1)[1] if " " in line else ""
+            session = _handle_provider_command(session, command, renderer)
+            renderer.assistant_label = _assistant_label(session)
+            record.history[:] = list(session.history)
+            continue
+        if line == "/effort" or line.startswith("/effort "):
+            session = _handle_effort_command(session, line.removeprefix("/effort").strip(), renderer)
+            renderer.assistant_label = _assistant_label(session)
+            record.history[:] = list(session.history)
+            continue
+        if _is_threads_command(line):
+            session, record = _handle_thread_command(session, record, line, renderer, root)
+            renderer.assistant_label = _assistant_label(session)
+            continue
+        if line == "/status":
+            renderer.info(_status_text(session, record, root))
+            continue
+        if line == "/config":
+            session = _config_palette(session, renderer)
+            renderer.assistant_label = _assistant_label(session)
+            record.history[:] = list(session.history)
+            continue
+        if line == "/history" or line.startswith("/history "):
+            _show_history(record, renderer, line)
+            continue
+        if line == "/clear":
+            renderer.clear()
+            continue
+        if line in {"/stop", "/interrupt"}:
+            renderer.info("No turn is running. During a running turn, press Ctrl-C to interrupt it.")
+            continue
+        if line == "/save":
+            record.history[:] = list(session.history)
+            _save(record, root)
+            renderer.info(f"saved thread {record.id}")
             continue
         if line == "/cwd":
             renderer.info(str(session.workdir))
             continue
         if line == "/reset":
             session.reset()
+            record.turns.clear()
+            record.history.clear()
+            _save(record, root)
             renderer.info("(history cleared)")
             continue
         if line == "/harness":
@@ -102,6 +198,12 @@ def run_repl(
         if line.startswith("/"):
             renderer.info(f"unknown command: {line} (try /help)")
             continue
+        natural = _natural_model_command(line)
+        if natural is not None:
+            session = _handle_model_command(session, natural, renderer)
+            renderer.assistant_label = _assistant_label(session)
+            record.history[:] = list(session.history)
+            continue
 
         _run_turn(session, line, renderer, record, root)
 
@@ -113,7 +215,7 @@ _MAX_AUTO_CONTINUE = 4  # how many times a turn may auto-resume after hitting th
 
 
 def _run_turn(
-    session: InteractiveSession,
+    session: CodeSession,
     line: str,
     renderer: ConsoleRenderer,
     record: SessionRecord,
@@ -153,6 +255,10 @@ def _run_turn(
                 on_tool_starting=_on_tool_starting,
                 on_model_request=_on_model_request,
             )
+        except KeyboardInterrupt:
+            renderer.end_stream(stop_reason="interrupted")
+            renderer.info("Interrupted. The turn was not saved; prompt control is back.")
+            return
         except Exception as exc:  # noqa: BLE001 - surface any transport/runtime error without crashing.
             renderer.end_stream(stop_reason="error")
             renderer.error(f"  ! error: {exc}")
@@ -161,6 +267,12 @@ def _run_turn(
         renderer.end_stream(fallback_text=result.final_text.strip(), stop_reason=result.stop_reason)
         if result.error:
             renderer.error(f"  ! {result.error}")
+            if _is_rate_limit_error(result.error):
+                renderer.info(
+                    "  Z.ai rate limit detected. Use `self-harness settings set model codex`, "
+                    "`self-harness settings set model agy`, or `self-harness settings set model claude` "
+                    "to run the main coding agent through a local headless CLI."
+                )
         renderer.harvest_note(len(result.harvested))
         _record_turn(record, message if attempt == 0 else "(auto-continue)", result)
         record.history[:] = list(session.history)
@@ -195,6 +307,619 @@ def _record_turn(record: SessionRecord, line: str, result: object) -> None:
     )
 
 
+def _is_rate_limit_error(text: str) -> bool:
+    lowered = text.lower()
+    return "rate limit" in lowered or "[1302]" in lowered
+
+
+def _agent_label(session: CodeSession) -> str:
+    backend = getattr(session, "backend", "")
+    if isinstance(backend, str) and backend:
+        return f"{backend} headless agent"
+    model = getattr(session, "model", "GLM 5.2")
+    return f"{model} dev agent"
+
+
+def _assistant_label(session: CodeSession) -> str:
+    backend = getattr(session, "backend", "")
+    if isinstance(backend, str) and backend:
+        return backend
+    model = str(getattr(session, "model", "glm"))
+    return "glm" if model.startswith("glm") else model
+
+
+def _is_exit_command(line: str) -> bool:
+    return line.strip().lower() in {"/exit", "/quit", "/q", ":q", "exit", "quit"}
+
+
+def _is_threads_command(line: str) -> bool:
+    lowered = line.strip().lower()
+    return (
+        lowered == "/threads"
+        or lowered.startswith("/threads ")
+        or lowered == "/thread"
+        or lowered.startswith("/thread ")
+    )
+
+
+def _command_palette(
+    session: CodeSession,
+    record: SessionRecord,
+    renderer: ConsoleRenderer,
+    root: Path | None,
+) -> tuple[CodeSession, SessionRecord, bool]:
+    renderer.menu(
+        "SelfHarness Command Palette",
+        [
+            ("1", "Model/provider/effort"),
+            ("2", "Threads"),
+            ("3", "Status"),
+            ("4", "Runtime config"),
+            ("5", "History"),
+            ("6", "Harness"),
+            ("7", "Harvested failures"),
+            ("8", "Save current thread"),
+            ("9", "Clear screen"),
+            ("10", "Reset current thread"),
+            ("11", "Help"),
+            ("0", "Exit SelfHarness Code"),
+        ],
+        footer="Type a number, or press Enter to cancel.",
+    )
+    choice = renderer.ask("command").strip().lower()
+    if not choice:
+        return session, record, False
+    if choice in {"1", "model", "m"}:
+        session = _model_palette(session, renderer)
+    elif choice in {"2", "threads", "thread", "t"}:
+        session, record = _thread_palette(session, record, renderer, root)
+    elif choice in {"3", "status", "s"}:
+        renderer.info(_status_text(session, record, root))
+    elif choice in {"4", "config", "settings", "c"}:
+        session = _config_palette(session, renderer)
+    elif choice in {"5", "history"}:
+        _show_history(record, renderer, "/history")
+    elif choice in {"6", "harness"}:
+        lineage = "evolving lineage" if session.evolving else "initial_harness() (Figure 3)"
+        renderer.info(f"harness {session.harness_hash} ({lineage})")
+    elif choice in {"7", "harvested"}:
+        _show_harvested(session, renderer)
+    elif choice in {"8", "save"}:
+        record.history[:] = list(session.history)
+        _save(record, root)
+        renderer.info(f"saved thread {record.id}")
+    elif choice in {"9", "clear"}:
+        renderer.clear()
+    elif choice in {"10", "reset"}:
+        if _confirm(renderer, "Clear current thread history?"):
+            session.reset()
+            record.history.clear()
+            record.turns.clear()
+            _save(record, root)
+            renderer.info("(history cleared)")
+    elif choice in {"11", "help", "?"}:
+        renderer.info(_HELP)
+    elif choice in {"0", "exit", "quit", "q"}:
+        return session, record, True
+    else:
+        renderer.info(f"unknown palette choice: {choice}")
+    return session, record, False
+
+
+def _handle_model_command(session: CodeSession, raw: str, renderer: ConsoleRenderer) -> CodeSession:
+    if not raw:
+        return _model_palette(session, renderer)
+    try:
+        provider, model, effort = _parse_model_selection(raw, default_provider=_provider(session))
+    except ValueError as exc:
+        renderer.error(f"  ! {exc}")
+        return session
+    selected = _switch_code_backend(session, provider=provider, model=model, effort=effort, renderer=renderer)
+    _persist_code_selection(selected)
+    renderer.info(_model_status(selected))
+    return selected
+
+
+def _handle_provider_command(session: CodeSession, raw: str, renderer: ConsoleRenderer) -> CodeSession:
+    if not raw:
+        return _model_palette(session, renderer)
+    try:
+        provider, model, effort = _parse_model_selection(raw, default_provider=_provider(session))
+    except ValueError as exc:
+        renderer.error(f"  ! {exc}")
+        return session
+    selected = _switch_code_backend(session, provider=provider, model=model, effort=effort, renderer=renderer)
+    _persist_code_selection(selected)
+    renderer.info(_model_status(selected))
+    return selected
+
+
+def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRenderer) -> CodeSession:
+    if not raw:
+        picked = _effort_picker(session, renderer)
+        if picked is None:
+            renderer.info(_model_status(session))
+            return session
+        raw = picked
+    effort = _normalize_effort(raw)
+    if effort is None:
+        renderer.error("  ! effort must be one of: low, medium, high, xhigh, max")
+        return session
+    selected: CodeSession
+    if isinstance(session, HeadlessCliSession):
+        session.effort = effort
+        selected = session
+    else:
+        renderer.info("GLM/Z.ai does not expose an effort control here; saved for the next headless backend.")
+        selected = session
+    _persist_code_selection(selected, effort=effort)
+    renderer.info(_model_status(selected))
+    return selected
+
+
+def _model_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSession:
+    current_provider = _provider(session)
+    renderer.menu(
+        "Model / Provider",
+        [
+            ("1", f"Codex headless CLI{' (current)' if current_provider == 'codex' else ''}"),
+            ("2", f"Agy headless CLI{' (current)' if current_provider == 'agy' else ''}"),
+            ("3", f"Claude headless CLI{' (current)' if current_provider == 'claude' else ''}"),
+            ("4", f"GLM via Z.ai{' (current)' if current_provider == 'glm' else ''}"),
+            ("0", "Cancel"),
+        ],
+        footer=_model_status(session),
+    )
+    choice = renderer.ask("provider").strip().lower()
+    if not choice or choice == "0":
+        return session
+    mapping = {"1": "codex", "2": "agy", "3": "claude", "4": "glm"}
+    if choice in mapping:
+        provider = mapping[choice]
+    else:
+        try:
+            provider = _normalize_provider(choice)
+        except ValueError as exc:
+            renderer.error(f"  ! {exc}")
+            return session
+    current_model = getattr(session, "model", None)
+    model = renderer.ask("model (blank = provider default)", default=current_model or "").strip() or None
+    effort = getattr(session, "effort", None)
+    if provider in {"codex", "claude"}:
+        selected_effort = _effort_picker(session, renderer, current=effort)
+        effort = selected_effort or effort
+    elif provider == "agy":
+        renderer.info("Agy exposes model selection; no effort flag is advertised by this install.")
+        effort = None
+    selected = _switch_code_backend(session, provider=provider, model=model, effort=effort, renderer=renderer)
+    _persist_code_selection(selected)
+    renderer.info(_model_status(selected))
+    return selected
+
+
+def _effort_picker(
+    session: CodeSession,
+    renderer: ConsoleRenderer,
+    *,
+    current: str | None = None,
+) -> str | None:
+    current_effort = current or getattr(session, "effort", None)
+    renderer.menu(
+        "Reasoning Effort",
+        [
+            ("1", "low"),
+            ("2", "medium"),
+            ("3", "high"),
+            ("4", "xhigh / extra high"),
+            ("5", "max"),
+            ("0", "provider default / unchanged"),
+        ],
+        footer=f"current: {current_effort or 'provider default'}",
+    )
+    choice = renderer.ask("effort").strip().lower()
+    mapping = {"1": "low", "2": "medium", "3": "high", "4": "xhigh", "5": "max", "0": None, "": None}
+    if choice in mapping:
+        return mapping[choice]
+    effort = _normalize_effort(choice)
+    if effort is None:
+        renderer.error("  ! effort must be one of: low, medium, high, xhigh, max")
+    return effort
+
+
+def _parse_model_selection(raw: str, *, default_provider: str) -> tuple[str, str | None, str | None]:
+    try:
+        tokens = shlex.split(raw)
+    except ValueError as exc:
+        raise ValueError(f"could not parse model command: {exc}") from exc
+    if not tokens:
+        return default_provider, None, None
+
+    provider = default_provider
+    effort: str | None = None
+    rest: list[str] = []
+    idx = 0
+    while idx < len(tokens):
+        token = tokens[idx]
+        lowered = token.lower()
+        if lowered in {"--provider", "--backend"}:
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError(f"{token} needs a provider")
+            provider = _normalize_provider(tokens[idx])
+        elif lowered == "--effort":
+            idx += 1
+            if idx >= len(tokens):
+                raise ValueError("--effort needs a level")
+            effort = _normalize_effort(tokens[idx])
+            if effort is None:
+                raise ValueError("effort must be one of: low, medium, high, xhigh, max")
+        else:
+            rest.append(token)
+        idx += 1
+
+    if rest and _is_provider(rest[0]):
+        provider = _normalize_provider(rest.pop(0))
+
+    effort_from_tail = _pop_effort(rest)
+    if effort_from_tail is not None:
+        effort = effort_from_tail
+
+    model = _normalize_model_name(rest)
+    return provider, model, effort
+
+
+def _switch_code_backend(
+    session: CodeSession,
+    *,
+    provider: str,
+    model: str | None,
+    effort: str | None,
+    renderer: ConsoleRenderer,
+) -> CodeSession:
+    if provider == "glm":
+        try:
+            api_key = resolve_zai_api_key()
+        except AgenticRunnerError as exc:
+            renderer.error(f"  ! {exc}")
+            return session
+        return InteractiveSession(
+            api_key=api_key,
+            base_url=resolve_zai_base_url(),
+            workdir=session.workdir,
+            harness=session.harness,
+            harvester=session.harvester,
+            model=model or DEFAULT_GLM_MODEL,
+            max_steps=session.max_steps,
+            tool_timeout_seconds=session.tool_timeout_seconds,
+            evolving=session.evolving,
+            history=list(session.history),
+            turn_index=session.turn_index,
+        )
+
+    if isinstance(session, HeadlessCliSession) and session.backend == provider:
+        if model is not None:
+            session.model = model
+        if effort is not None:
+            session.effort = effort
+        return session
+
+    return HeadlessCliSession(
+        backend=provider,
+        binary=headless_binary_for_backend(provider),
+        workdir=session.workdir,
+        harness=session.harness,
+        harvester=session.harvester,
+        model=model,
+        effort=effort,
+        max_steps=session.max_steps,
+        tool_timeout_seconds=session.tool_timeout_seconds,
+        evolving=session.evolving,
+        history=list(session.history),
+        turn_index=session.turn_index,
+    )
+
+
+def _persist_code_selection(
+    session: CodeSession,
+    *,
+    effort: str | None = None,
+) -> None:
+    cfg = user_config.load_config()
+    provider = _provider(session)
+    cfg.set("code_provider", provider)
+    model = getattr(session, "model", None)
+    if isinstance(model, str) and model:
+        cfg.set("code_model", model)
+    else:
+        cfg.unset("code_model")
+    selected_effort = effort or getattr(session, "effort", None)
+    if isinstance(selected_effort, str) and selected_effort:
+        cfg.set("code_effort", selected_effort)
+    elif provider in {"codex", "claude"}:
+        cfg.unset("code_effort")
+    # Keep the legacy startup path readable for older installs and `settings get model`.
+    cfg.set("model", provider if provider != "glm" else (model or DEFAULT_GLM_MODEL))
+    cfg.save()
+
+
+def _model_status(session: CodeSession) -> str:
+    provider = _provider(session)
+    model = getattr(session, "model", None) or ("provider default" if provider != "glm" else DEFAULT_GLM_MODEL)
+    effort = getattr(session, "effort", None) or "provider default"
+    binary = getattr(session, "binary", None)
+    binary_text = f", binary: {binary}" if isinstance(binary, str) and binary else ""
+    effort_note = " (not used by agy)" if provider == "agy" and effort != "provider default" else ""
+    return f"provider: {provider}, model: {model}, effort: {effort}{effort_note}{binary_text}"
+
+
+def _provider(session: CodeSession) -> str:
+    backend = getattr(session, "backend", "")
+    if isinstance(backend, str) and backend:
+        return _normalize_provider(backend)
+    return "glm"
+
+
+def _normalize_provider(value: str) -> str:
+    normalized = value.strip().lower().replace("_", "-")
+    if normalized not in _PROVIDER_ALIASES:
+        raise ValueError(f"provider must be one of: glm, codex, agy, claude (got {value!r})")
+    return _PROVIDER_ALIASES[normalized]
+
+
+def _is_provider(value: str) -> bool:
+    return value.strip().lower().replace("_", "-") in _PROVIDER_ALIASES
+
+
+def _normalize_effort(value: str) -> str | None:
+    normalized = value.strip().lower().replace("_", "-")
+    return _EFFORT_ALIASES.get(normalized)
+
+
+def _pop_effort(tokens: list[str]) -> str | None:
+    if len(tokens) >= 2:
+        pair = f"{tokens[-2]} {tokens[-1]}".lower().replace("_", "-")
+        effort = _EFFORT_ALIASES.get(pair)
+        if effort is not None:
+            del tokens[-2:]
+            return effort
+    if tokens:
+        effort = _normalize_effort(tokens[-1])
+        if effort is not None:
+            tokens.pop()
+            return effort
+    return None
+
+
+def _normalize_model_name(tokens: list[str]) -> str | None:
+    if not tokens:
+        return None
+    if len(tokens) == 1:
+        return tokens[0]
+    head = tokens[0].lower()
+    joined = " ".join(tokens)
+    if head in {"gpt", "glm", "claude", "o", "o3", "o4"}:
+        return joined.replace(" ", "-")
+    return joined
+
+
+def _natural_model_command(line: str) -> str | None:
+    lowered = line.strip().lower()
+    prefixes = ("change to ", "switch to ", "use model ", "use provider ")
+    if not lowered.startswith(prefixes):
+        return None
+    remainder = line.strip().split(" ", 2)[2] if lowered.startswith("use ") else line.strip().split(" ", 2)[2]
+    clue_text = remainder.lower()
+    clues = ("gpt", "claude", "sonnet", "opus", "codex", "agy", "glm", "o3", "o4", "xhigh", "extra high")
+    return remainder if any(clue in clue_text for clue in clues) else None
+
+
+def _handle_thread_command(
+    session: CodeSession,
+    record: SessionRecord,
+    line: str,
+    renderer: ConsoleRenderer,
+    root: Path | None,
+) -> tuple[CodeSession, SessionRecord]:
+    raw = line.split(maxsplit=1)[1] if " " in line else ""
+    if root is None:
+        renderer.info("(threads are not persisted in this mode)")
+        return session, record
+    if not raw:
+        return _thread_palette(session, record, renderer, root)
+    parts = raw.split()
+    action = parts[0].lower()
+    arg = " ".join(parts[1:]).strip()
+    if action in {"list", "ls"}:
+        _list_sessions(renderer, root)
+        return session, record
+    if action in {"new", "create"}:
+        _save_current_thread(session, record, root)
+        new_record = _new_thread_record(session)
+        session.reset()
+        _save(new_record, root)
+        renderer.info(f"new thread {new_record.id}")
+        return session, new_record
+    if action in {"switch", "open", "resume", "use"}:
+        if not arg:
+            renderer.error("  ! usage: /thread switch <id-or-number>")
+            return session, record
+        return _switch_thread(session, record, renderer, root, arg)
+    renderer.info("usage: /threads, /thread new, /thread switch <id-or-number>, /thread list")
+    return session, record
+
+
+def _thread_palette(
+    session: CodeSession,
+    record: SessionRecord,
+    renderer: ConsoleRenderer,
+    root: Path | None,
+) -> tuple[CodeSession, SessionRecord]:
+    if root is None:
+        renderer.info("(threads are not persisted in this mode)")
+        return session, record
+    records = list_sessions(root)
+    options = [("n", "New thread")]
+    for idx, item in enumerate(records[:20], start=1):
+        marker = "current, " if item.id == record.id else ""
+        options.append((str(idx), f"{item.id}  ·  {marker}{len(item.turns)} turn(s)  ·  {item.updated_at or '?'}"))
+    options.append(("0", "Cancel"))
+    renderer.menu("Threads", options, footer="Pick a thread number, n for new, or Enter to cancel.")
+    choice = renderer.ask("thread").strip()
+    if not choice or choice == "0":
+        return session, record
+    if choice.lower() in {"n", "new"}:
+        _save_current_thread(session, record, root)
+        new_record = _new_thread_record(session)
+        session.reset()
+        _save(new_record, root)
+        renderer.info(f"new thread {new_record.id}")
+        return session, new_record
+    return _switch_thread(session, record, renderer, root, choice)
+
+
+def _switch_thread(
+    session: CodeSession,
+    record: SessionRecord,
+    renderer: ConsoleRenderer,
+    root: Path,
+    selector: str,
+) -> tuple[CodeSession, SessionRecord]:
+    _save_current_thread(session, record, root)
+    target = _resolve_thread(root, selector)
+    if target is None:
+        renderer.error(f"  ! no thread matches {selector!r}")
+        return session, record
+    session.history[:] = list(target.history)
+    session.turn_index = len(target.turns)
+    session.harvester.seed_written(target.harvested)
+    renderer.info(f"switched to thread {target.id} ({len(target.turns)} turn(s))")
+    return session, target
+
+
+def _resolve_thread(root: Path, selector: str) -> SessionRecord | None:
+    if selector.isdigit():
+        index = int(selector) - 1
+        records = list_sessions(root)
+        return records[index] if 0 <= index < len(records) else None
+    return load_session(root, selector)
+
+
+def _new_thread_record(session: CodeSession) -> SessionRecord:
+    now = _now_stamp()
+    return SessionRecord(
+        id=f"code-{now}-{uuid.uuid4().hex[:8]}",
+        workdir=str(session.workdir),
+        harness_hash=session.harness_hash,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _save_current_thread(session: CodeSession, record: SessionRecord, root: Path | None) -> None:
+    record.history[:] = list(session.history)
+    _save(record, root)
+
+
+def _config_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSession:
+    cfg = user_config.load_config()
+    renderer.menu(
+        "Runtime Config",
+        [
+            ("1", f"Max steps per turn: {session.max_steps}"),
+            ("2", f"Tool timeout seconds: {session.tool_timeout_seconds}"),
+            ("3", f"Harvest failures: {'on' if session.harvester.enabled else 'off'}"),
+            ("4", "Model/provider/effort"),
+            ("5", f"Config path: {cfg.path}"),
+            ("0", "Cancel"),
+        ],
+        footer="Changes apply immediately to this session and are saved as defaults.",
+    )
+    choice = renderer.ask("config").strip().lower()
+    if choice in {"", "0"}:
+        return session
+    if choice == "1":
+        value = renderer.ask("max steps", default=str(session.max_steps)).strip()
+        try:
+            session.max_steps = max(1, int(value))
+        except ValueError:
+            renderer.error("  ! max steps must be an integer")
+            return session
+        cfg.set("max_steps", session.max_steps)
+    elif choice == "2":
+        value = renderer.ask("tool timeout seconds", default=str(session.tool_timeout_seconds)).strip()
+        try:
+            session.tool_timeout_seconds = max(1, int(value))
+        except ValueError:
+            renderer.error("  ! tool timeout must be an integer")
+            return session
+        cfg.set("tool_timeout_seconds", session.tool_timeout_seconds)
+    elif choice == "3":
+        session.harvester.enabled = not session.harvester.enabled
+        cfg.set("harvest", session.harvester.enabled)
+        renderer.info(f"harvest {'on' if session.harvester.enabled else 'off'}")
+    elif choice == "4":
+        session = _model_palette(session, renderer)
+        cfg = user_config.load_config()
+    elif choice == "5":
+        renderer.info(str(cfg.path))
+        return session
+    else:
+        renderer.info(f"unknown config choice: {choice}")
+        return session
+    cfg.save()
+    renderer.info(_status_text(session, None, None))
+    return session
+
+
+def _status_text(session: CodeSession, record: SessionRecord | None, root: Path | None) -> str:
+    thread = record.id if record is not None else "(unsaved)"
+    root_text = str(root) if root is not None else "(not persisting)"
+    lineage = "evolving lineage" if session.evolving else "initial_harness()"
+    return (
+        f"{_model_status(session)}\n"
+        f"thread: {thread}\n"
+        f"cwd: {session.workdir}\n"
+        f"session store: {root_text}\n"
+        f"harness: {session.harness_hash[:16]} ({lineage})\n"
+        f"harvest: {'on' if session.harvester.enabled else 'off'} -> {session.harvester.inbox_dir}\n"
+        f"max steps: {session.max_steps}, tool timeout: {session.tool_timeout_seconds}s"
+    )
+
+
+def _show_history(record: SessionRecord, renderer: ConsoleRenderer, line: str) -> None:
+    parts = line.split()
+    limit = 10
+    if len(parts) > 1:
+        try:
+            limit = max(1, int(parts[1]))
+        except ValueError:
+            renderer.error("  ! usage: /history [count]")
+            return
+    if not record.turns:
+        renderer.info("no turns in this thread yet")
+        return
+    rows = record.turns[-limit:]
+    for idx, turn in enumerate(rows, start=max(1, len(record.turns) - len(rows) + 1)):
+        user = str(turn.get("user", "")).replace("\n", " ")[:100]
+        stop = str(turn.get("stop_reason", ""))
+        renderer.info(f"{idx}. {user}  [{stop}]")
+
+
+def _show_harvested(session: CodeSession, renderer: ConsoleRenderer) -> None:
+    ids = session.harvester.written_ids
+    renderer.info(
+        f"harvested {len(ids)} failure bundle(s) this session" + (": " + ", ".join(ids) if ids else "")
+    )
+
+
+def _confirm(renderer: ConsoleRenderer, question: str) -> bool:
+    return renderer.ask(f"{question} Type yes to confirm").strip().lower() in {"y", "yes"}
+
+
+def _now_stamp() -> str:
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+
 def _save(record: SessionRecord, root: Path | None) -> None:
     if root is None:
         return
@@ -216,7 +941,7 @@ def _list_sessions(renderer: ConsoleRenderer, root: Path | None) -> None:
 
 
 def _farewell(
-    session: InteractiveSession,
+    session: CodeSession,
     renderer: ConsoleRenderer,
     record: SessionRecord,
     root: Path | None,

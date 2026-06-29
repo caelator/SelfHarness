@@ -21,6 +21,23 @@ from typing import Any
 
 DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic"
 DEFAULT_MODEL = "glm-5.2"
+_HEADLESS_CODE_PROVIDERS = {
+    "codex": "codex",
+    "codex-cli": "codex",
+    "agy": "agy",
+    "agy-cli": "agy",
+    "claude": "claude",
+    "claude-cli": "claude",
+    "claude-code": "claude",
+}
+_CODE_PROVIDER_ALIASES = {
+    **_HEADLESS_CODE_PROVIDERS,
+    "glm": "glm",
+    "glm-5": "glm",
+    "glm-5.2": "glm",
+    "zai": "glm",
+    "z.ai": "glm",
+}
 
 # Keys that may be stored in the config file. ``api_key`` is the only secret.
 _SECRET_KEYS = frozenset({"api_key"})
@@ -28,6 +45,9 @@ _KNOWN_KEYS = (
     "api_key",
     "base_url",
     "model",
+    "code_provider",
+    "code_model",
+    "code_effort",
     "max_steps",
     "tool_timeout_seconds",
     "auto_promote",
@@ -87,6 +107,21 @@ class UserConfig:
     @property
     def model(self) -> str | None:
         return self.values.get("model") or None
+
+    @property
+    def code_provider(self) -> str | None:
+        value = self.values.get("code_provider")
+        return _normalize_code_provider(value) if isinstance(value, str) and value else None
+
+    @property
+    def code_model(self) -> str | None:
+        value = self.values.get("code_model")
+        return value if isinstance(value, str) and value else None
+
+    @property
+    def code_effort(self) -> str | None:
+        value = self.values.get("code_effort")
+        return value if isinstance(value, str) and value else None
 
     # -- persistence ------------------------------------------------------------------------------
 
@@ -185,3 +220,69 @@ def resolve_model(explicit: str | None = None, config: UserConfig | None = None)
         return env
     cfg = config if config is not None else load_config()
     return cfg.model or DEFAULT_MODEL
+
+
+def resolve_code_provider(explicit: str | None = None, config: UserConfig | None = None) -> str:
+    if explicit:
+        return _normalize_code_provider(explicit)
+    env = os.environ.get("SELF_HARNESS_CODE_PROVIDER")
+    if env:
+        return _normalize_code_provider(env)
+    cfg = config if config is not None else load_config()
+    if cfg.code_provider:
+        return cfg.code_provider
+    legacy_model = resolve_model(config=cfg).strip().lower().replace("_", "-")
+    return _HEADLESS_CODE_PROVIDERS.get(legacy_model, "glm")
+
+
+def resolve_code_model(
+    explicit: str | None = None,
+    *,
+    provider: str | None = None,
+    config: UserConfig | None = None,
+) -> str | None:
+    if explicit:
+        return explicit
+    normalized_provider = _normalize_code_provider(provider) if provider else None
+    if normalized_provider:
+        env = os.environ.get(f"SELF_HARNESS_{normalized_provider.upper()}_MODEL")
+        if env:
+            return env
+    env = os.environ.get("SELF_HARNESS_CODE_MODEL")
+    if env:
+        return env
+    cfg = config if config is not None else load_config()
+    if cfg.code_model:
+        return cfg.code_model
+    if normalized_provider == "glm":
+        return resolve_model(config=cfg)
+    return None
+
+
+def resolve_code_effort(
+    explicit: str | None = None,
+    *,
+    provider: str | None = None,
+    config: UserConfig | None = None,
+) -> str | None:
+    if explicit:
+        return explicit
+    normalized_provider = _normalize_code_provider(provider) if provider else None
+    if normalized_provider:
+        env = os.environ.get(f"SELF_HARNESS_{normalized_provider.upper()}_EFFORT")
+        if env:
+            return env
+    env = os.environ.get("SELF_HARNESS_CODE_EFFORT")
+    if env:
+        return env
+    cfg = config if config is not None else load_config()
+    return cfg.code_effort
+
+
+def _normalize_code_provider(value: str | None) -> str:
+    normalized = (value or "").strip().lower().replace("_", "-")
+    if not normalized:
+        return "glm"
+    if normalized not in _CODE_PROVIDER_ALIASES:
+        raise ValueError(f"unknown code provider: {value!r} (known: glm, codex, agy, claude)")
+    return _CODE_PROVIDER_ALIASES[normalized]

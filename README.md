@@ -1,9 +1,23 @@
-# Self Harness
+# SelfHarness
 
-This is a small, paper-faithful implementation of the Self-Harness protocol
-from "Self-Harness: Harnesses That Improve Themselves" (arXiv:2606.09498).
+SelfHarness is a paper-faithful, audit-first implementation of the
+Self-Harness protocol from "Self-Harness: Harnesses That Improve Themselves"
+(arXiv:2606.09498). It is built for real agentic evaluation on trusted corpora:
+repeat-aware evaluation, bounded harness edits, held-in/held-out validation,
+and explicit artifact trails.
 
-The project implements the core loop without requiring API keys:
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+![SelfHarness loop](docs/assets/self-harness-loop.svg)
+
+## What It Does
+
+SelfHarness lets an agent improve the harness that guides its future work,
+while keeping every proposed change bounded, validated, and auditable. The core
+project runs without API keys, and provider-backed workflows can be connected
+through explicit operator configuration.
+
+The implementation follows the paper loop:
 
 1. Run a fixed harness on held-in and held-out tasks with repeated attempts.
 2. Mine verifier-grounded failure patterns from held-in failures only.
@@ -19,6 +33,27 @@ verification/failure-recovery instructions, runtime policy, tools, skills,
 memory sources, and subagents. The deterministic runner only exercises the
 instruction and runtime-policy surfaces; the remaining surfaces are present so
 production adapters can target the same harness shape.
+
+## What It Does Not Claim
+
+This repository is not a Terminal-Bench reproduction by itself. Live benchmark
+reproduction remains gated on operator-owned live artifacts, signed capture
+material, readiness evidence, provider/backend preflights, and bundle
+verification. The local gates intentionally keep `reproduction_claimed: false`
+until that evidence exists.
+
+## Architecture At A Glance
+
+![SelfHarness architecture](docs/assets/self-harness-architecture.svg)
+
+The public docs are organized for two audiences:
+
+- Researchers can start with the paper loop, editable surfaces, audit schema,
+  and reproduction boundary.
+- Operators can start with the CLI, trusted-corpus workflow, release gates,
+  readiness matrix, and Minerva deployment notes.
+
+Start with [docs/README.md](docs/README.md) for the full reading path.
 
 ## Quick Start
 
@@ -618,20 +653,54 @@ self-harness glm-agentic-demo examples/agentic_corpus.json \
 
 ## Coding Agent CLI (`self-harness code`)
 
-`self-harness code` is an interactive GLM 5.2 coding agent for your terminal —
-like Codex CLI or Claude Code, but wrapping GLM 5.2 and driven by the
+`self-harness code` is an interactive coding-agent TUI for your terminal. It can
+run GLM 5.2 through Z.ai or delegate the main coding turn to headless local CLIs
+(`codex`, `agy`, or `claude`) while still driving every turn with the active
 **self-improving harness**. It opens a multi-turn session in the current
-directory; GLM acts on your real repo with `bash`/`read_file`/`write_file` tools
-(auto-run, no per-command prompts), and the conversation persists across turns.
-The reply **streams token-by-token** into a rich terminal UI (live markdown,
-syntax-highlighted code, per-tool-call status, a thinking spinner); pipe the
-output or pass `--plain` for plain text.
+directory, persists conversation threads, and gives you an out-of-band control
+plane so model/provider/config changes are never sent to the model as chat.
+The reply streams into a rich terminal UI with markdown, per-tool-call status,
+and a thinking spinner; pipe the output or pass `--plain` for plain text.
 
 ```bash
 export ZAI_API_KEY="<z.ai coding-plan key>"
 self-harness code                      # in your project directory
 self-harness code --resume             # continue your most recent session
 ```
+
+Inside the TUI, type `/menu` to open the command palette. The palette reaches
+the same controls as the slash commands:
+
+```text
+/menu                         open the command palette
+/model                        TUI picker for provider/model/effort
+/model codex gpt-5.6 xhigh    set provider/model/effort directly
+/provider claude              switch provider
+/effort xhigh                 set reasoning effort where the provider supports it
+/threads                      thread picker
+/thread new                   start a clean conversation thread
+/thread switch <id-or-number> switch to a saved thread without leaving the CLI
+/config                       runtime settings picker
+/status                       show cwd, thread, harness, provider/model, harvest, budgets
+/history [n]                  show recent turns
+/save                         persist current thread immediately
+/clear                        clear the screen
+/reset                        clear current thread history
+/exit, /quit, /q, :q           leave the CLI
+Ctrl-C                        at prompt: exit; during a turn: interrupt and return to prompt
+```
+
+Provider defaults can also be set before launch:
+
+```bash
+self-harness settings set code_provider codex
+self-harness settings set code_model gpt-5.6
+self-harness settings set code_effort xhigh
+```
+
+The older `settings set model codex|agy|claude|glm-5.2` compatibility path is
+still accepted, but new installs should prefer `code_provider`, `code_model`,
+and `code_effort`.
 
 What makes it different from a static-harness CLI: it closes a **self-improvement
 flywheel**. Every failing check/build/test command GLM hits during a session is
@@ -642,13 +711,12 @@ failures become held-in tasks that evolve the harness — so the agent gets bett
 `runs/harness_state.json`, so improvements flow straight back into the CLI.
 
 Type `@path/to/file` in a message to inline that file's contents into the turn.
-Sessions persist under `runs/sessions/` and resume with `--resume [id]` (list
-saved sessions in-session with `/sessions`). Slash commands: `/help`, `/harness`
-(active harness + lineage), `/harvested` (failures captured this session),
-`/sessions`, `/reset`, `/cwd`, `/exit`. Flags: `--root`, `--harness-state`,
-`--inbox-dir`, `--max-steps`, `--tool-timeout-seconds`, `--no-harvest` (disable
-the flywheel), `--resume [id]`, `--plain`. Auto-run executes model-generated
+Threads persist under `runs/sessions/` and can be resumed at startup with
+`--resume [id]` or switched live with `/threads`. Flags: `--root`,
+`--harness-state`, `--inbox-dir`, `--max-steps`, `--tool-timeout-seconds`,
+`--no-harvest`, `--resume [id]`, `--plain`. Auto-run executes model-generated
 commands directly on the host (no container) — use it on repos you trust.
+See `docs/operations/code_cli.md` for the complete control-plane reference.
 
 > `self-harness code` is the one component with a third-party runtime dependency
 > (`rich`, for the terminal UI). It is imported lazily and only by the CLI's UI
@@ -960,3 +1028,7 @@ are audited as invalid candidates with explicit reasons.
 
 - Paper: https://arxiv.org/abs/2606.09498
 - Article: https://venturebeat.com/orchestration/researchers-introduce-self-harness-a-framework-that-lets-ai-agents-rewrite-their-own-rules-boosting-performance-up-to-60/
+
+## License
+
+SelfHarness is released under the MIT License. See [LICENSE](LICENSE).

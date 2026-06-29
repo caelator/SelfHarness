@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">SelfHarness loop</title>
+  <desc id="desc">A loop from evaluation through weakness mining, harness proposal, validation, promotion, and audit, with held-in and held-out guardrails.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#23433c"/>
+    </marker>
+    <linearGradient id="band" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ecf7f4"/>
+      <stop offset="1" stop-color="#f7f1e4"/>
+    </linearGradient>
+    <style>
+      .bg{fill:#fbfaf7}
+      .panel{fill:#ffffff;stroke:#d6d0c5;stroke-width:2}
+      .guard{fill:url(#band);stroke:#8aa79e;stroke-width:2}
+      .title{font:700 34px Arial,sans-serif;fill:#17231f}
+      .sub{font:400 18px Arial,sans-serif;fill:#44504b}
+      .step{font:700 18px Arial,sans-serif;fill:#17231f}
+      .body{font:400 15px Arial,sans-serif;fill:#44504b}
+      .tiny{font:400 13px Arial,sans-serif;fill:#5d6964}
+      .arrow{fill:none;stroke:#23433c;stroke-width:3;marker-end:url(#arrow)}
+      .muted{fill:none;stroke:#9d958a;stroke-width:2;stroke-dasharray:7 7;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1200" height="620"/>
+  <rect class="guard" x="60" y="46" width="1080" height="96" rx="8"/>
+  <text class="title" x="88" y="88">SelfHarness Evolution Loop</text>
+  <text class="sub" x="88" y="119">Bounded harness edits are proposed from held-in evidence, validated on repeated split evaluations, and promoted only when aggregate pass counts do not regress.</text>
+
+  <rect class="panel" x="80" y="210" width="178" height="104" rx="8"/>
+  <text class="step" x="104" y="244">1. Evaluate</text>
+  <text class="body" x="104" y="270">Run current harness</text>
+  <text class="body" x="104" y="292">with repeat counts.</text>
+
+  <rect class="panel" x="300" y="210" width="178" height="104" rx="8"/>
+  <text class="step" x="324" y="244">2. Mine</text>
+  <text class="body" x="324" y="270">Summarize held-in</text>
+  <text class="body" x="324" y="292">failures only.</text>
+
+  <rect class="panel" x="520" y="210" width="178" height="104" rx="8"/>
+  <text class="step" x="544" y="244">3. Propose</text>
+  <text class="body" x="544" y="270">Generate bounded edits</text>
+  <text class="body" x="544" y="292">to declared surfaces.</text>
+
+  <rect class="panel" x="740" y="210" width="178" height="104" rx="8"/>
+  <text class="step" x="764" y="244">4. Validate</text>
+  <text class="body" x="764" y="270">Check held-in and</text>
+  <text class="body" x="764" y="292">held-out aggregates.</text>
+
+  <rect class="panel" x="960" y="210" width="178" height="104" rx="8"/>
+  <text class="step" x="984" y="244">5. Promote</text>
+  <text class="body" x="984" y="270">Accept improvement</text>
+  <text class="body" x="984" y="292">without regressions.</text>
+
+  <path class="arrow" d="M258 262 H292"/>
+  <path class="arrow" d="M478 262 H512"/>
+  <path class="arrow" d="M698 262 H732"/>
+  <path class="arrow" d="M918 262 H952"/>
+
+  <rect class="panel" x="380" y="410" width="440" height="118" rx="8"/>
+  <text class="step" x="414" y="447">6. Audit Every Round</text>
+  <text class="body" x="414" y="474">Record changed surfaces, repeats, pass counts, proposal lineage,</text>
+  <text class="body" x="414" y="496">invalid/rejected reasons, and deterministic artifact hashes.</text>
+  <path class="arrow" d="M1049 314 C1049 420 902 468 832 468"/>
+  <path class="muted" d="M380 468 C204 468 169 358 169 322"/>
+
+  <rect class="guard" x="82" y="352" width="250" height="108" rx="8"/>
+  <text class="step" x="110" y="388">Held-In Context</text>
+  <text class="tiny" x="110" y="414">Failures, passing summaries,</text>
+  <text class="tiny" x="110" y="435">and previous attempts feed proposals.</text>
+
+  <rect class="guard" x="868" y="352" width="250" height="108" rx="8"/>
+  <text class="step" x="896" y="388">Held-Out Guardrail</text>
+  <text class="tiny" x="896" y="414">Validation evidence is used for</text>
+  <text class="tiny" x="896" y="435">promotion, not proposal context.</text>
+</svg>

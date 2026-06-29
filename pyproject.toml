@@ -59,9 +59,17 @@ packages = ["src/self_harness"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+  "/CHANGELOG.md",
+  "/CODE_OF_CONDUCT.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
   "/README.md",
   "/RELEASE.md",
+  "/SECURITY.md",
+  "/docs/README.md",
   "/docs/architecture",
+  "/docs/assets",
+  "/docs/governance",
   "/docs/operations",
   "/docs/source/audit_trajectory.md",
   "/docs/source/audit_integrity.md",

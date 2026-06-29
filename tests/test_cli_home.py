@@ -73,6 +73,27 @@ def test_resolve_defaults(cfg_home: Path) -> None:
     assert user_config.resolve_api_key() is None
 
 
+def test_code_provider_model_effort_resolution(cfg_home: Path) -> None:
+    c = user_config.load_config()
+    c.set("code_provider", "codex")
+    c.set("code_model", "gpt-5.6")
+    c.set("code_effort", "xhigh")
+    c.save()
+
+    loaded = user_config.load_config()
+    assert user_config.resolve_code_provider(config=loaded) == "codex"
+    assert user_config.resolve_code_model(provider="codex", config=loaded) == "gpt-5.6"
+    assert user_config.resolve_code_effort(provider="codex", config=loaded) == "xhigh"
+
+
+def test_legacy_model_codex_selects_headless_provider(cfg_home: Path) -> None:
+    c = user_config.load_config()
+    c.set("model", "codex")
+    c.save()
+
+    assert user_config.resolve_code_provider(config=user_config.load_config()) == "codex"
+
+
 def test_loop_eval_repeats_resolution(cfg_home: Path) -> None:
     from self_harness import cli
 

@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from self_harness.adapters.agentic.agent_loop import run_agent_loop
 from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
-from self_harness.adapters.agentic.tools import DEFAULT_TOOL_TIMEOUT_SECONDS
+from self_harness.adapters.agentic.tools import DEFAULT_TOOL_TIMEOUT_SECONDS, ToolResult
 from self_harness.adapters.llm.messages import (
     AnthropicAgentTransport,
     MessagesTransport,
@@ -36,6 +38,12 @@ class TurnResult:
     harvested: list[str] = field(default_factory=list)
     error: str | None = None
     tool_activity: list[str] = field(default_factory=list)
+
+
+class _EventSummary(TypedDict):
+    steps: int
+    tool_calls: int
+    usage: dict[str, int]
 
 
 def load_session_harness(harness_state: Path) -> tuple[HarnessSpec, bool]:
@@ -182,3 +190,398 @@ class InteractiveSession:
             error=loop.error,
             tool_activity=activity,
         )
+
+
+HEADLESS_CLI_BACKENDS = frozenset({"codex", "agy", "claude"})
+
+
+@dataclass
+class HeadlessCliSession:
+    """A ``self-harness code`` session backed by a local headless coding CLI.
+
+    The external CLI owns its internal tool loop, so SelfHarness passes the active harness plus
+    conversation history in the stdin prompt and records the final response back into the regular
+    session history. Codex's JSON event stream is also mirrored into the failure harvester when command
+    details are present; Agy and Claude currently expose only final text in this headless path.
+    """
+
+    backend: str
+    binary: str
+    workdir: Path
+    harness: HarnessSpec
+    harvester: FailureHarvester
+    model: str | None = None
+    effort: str | None = None
+    max_steps: int = DEFAULT_MAX_STEPS
+    tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
+    evolving: bool = False
+    history: list[dict[str, Any]] = field(default_factory=list)
+    turn_index: int = 0
+
+    @property
+    def harness_hash(self) -> str:
+        return harness_hash(self.harness)
+
+    def reset(self) -> None:
+        self.history.clear()
+        self.turn_index = 0
+
+    def send(
+        self,
+        user_text: str,
+        *,
+        on_text_delta: Callable[[str], None] | None = None,
+        on_tool_start: Callable[[str], None] | None = None,
+        on_tool_event: Callable[[str, str, bool], None] | None = None,
+        on_tool_starting: Callable[[str, str], None] | None = None,
+        on_model_request: Callable[[int], None] | None = None,
+    ) -> TurnResult:
+        del on_tool_start  # Headless CLIs do not expose SelfHarness's native text/tool callbacks here.
+        self.turn_index += 1
+        if on_model_request is not None:
+            on_model_request(0)
+
+        backend = _normalize_headless_backend(self.backend)
+        activity: list[str] = []
+        timeout_seconds = max(30, int(self.tool_timeout_seconds) * max(1, int(self.max_steps)))
+        with tempfile.TemporaryDirectory(prefix=f"self-harness-{backend}-") as tmp:
+            last_message_path = Path(tmp) / "last-message.txt"
+            command = _headless_command(
+                backend=backend,
+                binary=self.binary,
+                workdir=self.workdir,
+                last_message_path=last_message_path,
+                timeout_seconds=timeout_seconds,
+                model=self.model,
+                effort=self.effort,
+            )
+            if on_tool_starting is not None:
+                on_tool_starting(backend, f"$ {self.binary} {_headless_command_label(backend)}")
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=_headless_prompt(self.harness, self.history, user_text),
+                    cwd=self.workdir,
+                    env=dict(os.environ),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+            except FileNotFoundError:
+                return TurnResult(
+                    final_text="",
+                    steps=1,
+                    tool_calls=0,
+                    stop_reason="model_error",
+                    usage={},
+                    error=f"{backend} binary not found: {self.binary}",
+                )
+            except subprocess.TimeoutExpired:
+                return TurnResult(
+                    final_text="",
+                    steps=1,
+                    tool_calls=0,
+                    stop_reason="model_error",
+                    usage={},
+                    error=f"{backend} headless run timed out after {timeout_seconds}s",
+                )
+
+            event_summary: _EventSummary = {"steps": 1, "tool_calls": 0, "usage": {}}
+            if backend == "codex":
+                event_summary = _observe_codex_events(
+                    completed.stdout,
+                    harvester=self.harvester,
+                    activity=activity,
+                    on_tool_event=on_tool_event,
+                )
+            final_text = _read_headless_output(last_message_path, completed.stdout, backend=backend)
+            if on_text_delta is not None and final_text:
+                on_text_delta(final_text)
+            harvested = self.harvester.flush(id_prefix=f"cli-{self.turn_index:03d}")
+
+            if completed.returncode != 0:
+                return TurnResult(
+                    final_text=final_text,
+                    steps=max(1, event_summary["steps"]),
+                    tool_calls=event_summary["tool_calls"],
+                    stop_reason="model_error",
+                    usage=event_summary["usage"],
+                    harvested=harvested,
+                    error=_format_headless_error(completed, final_text, backend=backend),
+                    tool_activity=activity,
+                )
+
+        self.history.append({"role": "user", "content": user_text})
+        self.history.append({"role": "assistant", "content": final_text})
+        return TurnResult(
+            final_text=final_text,
+            steps=max(1, event_summary["steps"]),
+            tool_calls=event_summary["tool_calls"],
+            stop_reason="end_turn",
+            usage=event_summary["usage"],
+            harvested=harvested,
+            tool_activity=activity,
+        )
+
+
+CodexCliSession = HeadlessCliSession
+
+
+def _normalize_headless_backend(value: str) -> str:
+    backend = value.strip().lower().replace("_", "-")
+    if backend.endswith("-cli"):
+        backend = backend[:-4]
+    if backend == "claude-code":
+        backend = "claude"
+    if backend not in HEADLESS_CLI_BACKENDS:
+        raise ValueError(f"unsupported headless CLI backend: {value}")
+    return backend
+
+
+def headless_binary_for_backend(backend: str) -> str:
+    normalized = _normalize_headless_backend(backend)
+    specific = os.environ.get(f"SELF_HARNESS_{normalized.upper()}_BINARY")
+    if specific:
+        return specific
+    generic = os.environ.get("SELF_HARNESS_HEADLESS_BINARY")
+    if generic:
+        return generic
+    return normalized
+
+
+def _headless_command(
+    *,
+    backend: str,
+    binary: str,
+    workdir: Path,
+    last_message_path: Path,
+    timeout_seconds: int,
+    model: str | None = None,
+    effort: str | None = None,
+) -> list[str]:
+    model = model or _headless_model_override(backend)
+    effort = effort or _headless_effort_override(backend)
+    if backend == "codex":
+        command = [
+            binary,
+            "exec",
+            "--cd",
+            str(workdir),
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--color",
+            "never",
+            "--json",
+            "--output-last-message",
+            str(last_message_path),
+        ]
+        if model:
+            command.extend(["--model", model])
+        if effort:
+            command.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        command.append("-")
+        return command
+    if backend == "agy":
+        command = [
+            binary,
+            "--print",
+            "--dangerously-skip-permissions",
+            "--print-timeout",
+            f"{timeout_seconds}s",
+        ]
+        if model:
+            command.extend(["--model", model])
+        return command
+    if backend == "claude":
+        command = [
+            binary,
+            "--print",
+            "--bare",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "text",
+            "--input-format",
+            "text",
+            "--no-session-persistence",
+        ]
+        if model:
+            command.extend(["--model", model])
+        if effort:
+            command.extend(["--effort", effort])
+        return command
+    raise ValueError(f"unsupported headless CLI backend: {backend}")
+
+
+def _headless_command_label(backend: str) -> str:
+    if backend == "codex":
+        return "exec"
+    if backend == "agy":
+        return "--print"
+    if backend == "claude":
+        return "--print"
+    return "run"
+
+
+def _headless_model_override(backend: str) -> str | None:
+    specific = os.environ.get(f"SELF_HARNESS_{backend.upper()}_MODEL")
+    if specific:
+        return specific
+    return os.environ.get("SELF_HARNESS_HEADLESS_MODEL")
+
+
+def _headless_effort_override(backend: str) -> str | None:
+    specific = os.environ.get(f"SELF_HARNESS_{backend.upper()}_EFFORT")
+    if specific:
+        return specific
+    return os.environ.get("SELF_HARNESS_HEADLESS_EFFORT")
+
+
+def _headless_prompt(harness: HarnessSpec, history: list[dict[str, Any]], user_text: str) -> str:
+    parts = [
+        "You are running as the SelfHarness coding agent in the current working directory.",
+        "Follow this active harness exactly:",
+        render_system_prompt(harness),
+    ]
+    prior = _history_text(history)
+    if prior:
+        parts.extend(["Conversation so far:", prior])
+    parts.extend(["Current user request:", user_text])
+    return "\n\n".join(parts)
+
+
+def _history_text(history: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for msg in history[-12:]:
+        role = str(msg.get("role", "message"))
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = json.dumps(content, ensure_ascii=False)
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def _read_headless_output(path: Path, stdout: str, *, backend: str) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    if text.strip():
+        return text.strip()
+    if backend != "codex":
+        return stdout.strip()
+    last_assistant = ""
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        candidate = _extract_text(event)
+        if candidate:
+            last_assistant = candidate
+    return last_assistant.strip()
+
+
+def _observe_codex_events(
+    stdout: str,
+    *,
+    harvester: FailureHarvester,
+    activity: list[str],
+    on_tool_event: Callable[[str, str, bool], None] | None,
+) -> _EventSummary:
+    usage: dict[str, int] = {}
+    pending_commands: dict[str, str] = {}
+    steps = 0
+    tool_calls = 0
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        steps += 1
+        _merge_usage(usage, event.get("usage"))
+        item = event.get("item") if isinstance(event.get("item"), dict) else event
+        command = _extract_command(item)
+        item_id = str(item.get("id") or event.get("id") or len(pending_commands))
+        if command and str(event.get("type", "")).endswith("started"):
+            pending_commands[item_id] = command
+            continue
+        if command:
+            pending_commands[item_id] = command
+
+        completed_command = pending_commands.pop(item_id, command or "")
+        if completed_command and _is_completed_event(event):
+            output = _extract_output(item)
+            exit_code = _extract_exit_code(item)
+            is_error = bool(exit_code not in (None, 0))
+            tool_calls += 1
+            summary = f"$ {completed_command[:80]}"
+            activity.append(f"bash: {completed_command[:80]} ({'error' if is_error else 'ok'})")
+            harvester.observe(
+                "bash",
+                {"command": completed_command},
+                ToolResult(output=output or f"exit_code={exit_code}", is_error=is_error),
+            )
+            if on_tool_event is not None:
+                on_tool_event("bash", summary, not is_error)
+    return {"steps": steps, "tool_calls": tool_calls, "usage": usage}
+
+
+def _merge_usage(target: dict[str, int], usage: Any) -> None:
+    if not isinstance(usage, dict):
+        return
+    for key, value in usage.items():
+        if isinstance(value, int):
+            target[key] = target.get(key, 0) + value
+
+
+def _extract_text(event: dict[str, Any]) -> str:
+    raw_item = event.get("item")
+    item = raw_item if isinstance(raw_item, dict) else event
+    for key in ("text", "message", "content", "final_message"):
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
+def _extract_command(item: dict[str, Any]) -> str:
+    for key in ("command", "cmd"):
+        value = item.get(key)
+        if isinstance(value, str):
+            return value
+    args = item.get("args")
+    if isinstance(args, list) and all(isinstance(part, str) for part in args):
+        return " ".join(args)
+    return ""
+
+
+def _extract_output(item: dict[str, Any]) -> str:
+    for key in ("aggregated_output", "output", "stdout", "stderr"):
+        value = item.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _extract_exit_code(item: dict[str, Any]) -> int | None:
+    for key in ("exit_code", "exitCode", "returncode", "return_code"):
+        value = item.get(key)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _is_completed_event(event: dict[str, Any]) -> bool:
+    event_type = str(event.get("type", ""))
+    return event_type.endswith("completed") or event_type.endswith("finished")
+
+
+def _format_headless_error(
+    completed: subprocess.CompletedProcess[str], final_text: str, *, backend: str
+) -> str:
+    stderr = completed.stderr.strip()
+    stdout = completed.stdout.strip()
+    detail = stderr or stdout or final_text or f"{backend} headless run failed"
+    return f"{backend} headless run exited {completed.returncode}: {detail[-1200:]}"

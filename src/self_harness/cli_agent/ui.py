@@ -2,7 +2,7 @@
 
 This is the only module in ``cli_agent`` that imports ``rich``. It shares its color palette with
 ``console_style`` so the coding chat and the rest of the CLI agree on who-said-what (you = green,
-GLM = magenta, tools = yellow, dim scaffolding, green/red for ok/error).
+assistant = magenta, tools = yellow, dim scaffolding, green/red for ok/error).
 
 Streaming design (correctness over flashiness): rendering a growing Markdown buffer in a live region is
 fundamentally unsafe — once the reply is taller than the terminal, the lines that scroll off cannot be
@@ -40,7 +40,7 @@ def _fmt_tokens(n: int) -> str:
     return f"{n / 1000:.1f}k"
 
 # Pull the shared palette so the chat matches the menu/settings/help/loop coloring exactly.
-_GLM = STYLES["glm"]
+_ASSISTANT = STYLES["glm"]
 _USER = STYLES["user"]
 _TOOL = STYLES["tool"]
 _DIM = STYLES["system"]
@@ -52,9 +52,10 @@ _HEAD = STYLES["heading"]
 class ConsoleRenderer:
     """Streamed rich UI with a plain fallback. One renderer per session."""
 
-    def __init__(self, *, plain: bool = False) -> None:
+    def __init__(self, *, plain: bool = False, assistant_label: str = "agent") -> None:
         # Fall back to plain output when asked, or when stdout is not a TTY (pipes, tests, CI).
         self.plain = plain or not sys.stdout.isatty()
+        self.assistant_label = assistant_label
         self._console: Any = None
         self._live: Any = None
         self._heartbeat: Any = None  # _Heartbeat renderable driving the "Working…" line
@@ -72,23 +73,25 @@ class ConsoleRenderer:
 
     # -- session chrome ---------------------------------------------------------------------------
 
-    def banner(self, *, workdir: str, harness_hash: str, lineage: str, harvest: str) -> None:
+    def banner(
+        self, *, workdir: str, harness_hash: str, lineage: str, harvest: str, agent_label: str
+    ) -> None:
         if self.plain or self._console is None:
-            print("SelfHarness Code — GLM 5.2 dev agent")
+            print(f"SelfHarness Code — {agent_label}")
             print(f"  cwd: {workdir}")
             print(f"  harness: {harness_hash[:16]} ({lineage})")
             print(f"  harvest: {harvest}")
-            print("Type /help for commands, /exit to quit.\n")
+            print("Type /help for commands, /model to switch backend/model, /exit to quit.\n")
             return
         from rich.panel import Panel
         from rich.text import Text
 
         body = Text()
-        body.append("GLM 5.2 dev agent — self-improving harness\n", style=_HEAD)
+        body.append(f"{agent_label} — self-improving harness\n", style=_HEAD)
         body.append(f"cwd      {workdir}\n", style=_DIM)
         body.append(f"harness  {harness_hash[:16]} ({lineage})\n", style=_DIM)
         body.append(f"harvest  {harvest}\n", style=_DIM)
-        body.append("/help for commands · /exit to quit", style="dim italic")
+        body.append("/help commands · /model switch · /exit quit", style="dim italic")
         self._console.print(Panel(body, title="SelfHarness Code", border_style=_HEAD))
 
     def info(self, text: str) -> None:
@@ -103,6 +106,12 @@ class ConsoleRenderer:
         else:
             self._console.print(text, style=_ERR, highlight=False)
 
+    def clear(self) -> None:
+        if self.plain or self._console is None:
+            print("\033c", end="")
+        else:
+            self._console.clear()
+
     def prompt(self) -> str:
         # input() works in both modes; rich's console.input would break piped-stdin tests, so style the
         # label ourselves and read with stdlib input.
@@ -110,6 +119,40 @@ class ConsoleRenderer:
             return input("you › ")
         self._console.print("you › ", style=_USER, end="")
         return input()
+
+    def ask(self, label: str, *, default: str | None = None) -> str:
+        suffix = f" [{default}]" if default else ""
+        prompt = f"{label}{suffix} › "
+        if self.plain or self._console is None:
+            value = input(prompt)
+        else:
+            self._console.print(prompt, style=_USER, end="")
+            value = input()
+        return default if value == "" and default is not None else value
+
+    def menu(self, title: str, options: list[tuple[str, str]], *, footer: str = "") -> None:
+        if self.plain or self._console is None:
+            print(title)
+            for key, label in options:
+                print(f"  {key}. {label}")
+            if footer:
+                print(footer)
+            return
+        from rich.panel import Panel
+        from rich.table import Table
+
+        table = Table.grid(padding=(0, 2))
+        table.add_column(style=_USER, justify="right")
+        table.add_column(style=_DIM)
+        for key, label in options:
+            table.add_row(key, label)
+        renderable: Any = table
+        if footer:
+            from rich.console import Group
+            from rich.text import Text
+
+            renderable = Group(table, Text(footer, style="dim italic"))
+        self._console.print(Panel(renderable, title=title, border_style=_HEAD))
 
     # -- per-turn activity heartbeat --------------------------------------------------------------
 
@@ -172,9 +215,9 @@ class ConsoleRenderer:
             return
         self._label_shown = True
         if self.plain or self._console is None:
-            print("\nglm › ", end="", flush=True)
+            print(f"\n{self.assistant_label} › ", end="", flush=True)
         else:
-            self._console.print("glm ›", style=_GLM)
+            self._console.print(f"{self.assistant_label} ›", style=_ASSISTANT)
 
     def push_delta(self, delta: str) -> None:
         if not delta:
@@ -340,4 +383,3 @@ class _Heartbeat:
 
 class _PlainHeartbeat(_Heartbeat):
     """Same state tracking as :class:`_Heartbeat`, used in plain mode (no rich render)."""
-

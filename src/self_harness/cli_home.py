@@ -22,20 +22,24 @@ from self_harness.console_style import console
 # Help content — plain-language, grouped, not the raw argparse dump.
 # ---------------------------------------------------------------------------------------------------
 
-_TAGLINE = "SelfHarness — a GLM 5.2 coding agent that improves its own harness as you use it."
+_TAGLINE = (
+    "SelfHarness — a coding agent that improves its own harness as you use it "
+    "(GLM 5.2 or headless codex/agy/claude)."
+)
 
 HELP_TOPICS: dict[str, str] = {
     "overview": f"""\
 {_TAGLINE}
 
 What it is
-  A terminal coding assistant powered by GLM 5.2, wrapped in a "self-harness" loop: the
-  instructions that steer the model (its harness) are not fixed — the system mines the agent's
-  own failures and rewrites the harness to do better, keeping only changes that measurably help.
+  A terminal coding assistant powered by GLM 5.2 or a headless local CLI provider (codex, agy,
+  claude), wrapped in a "self-harness" loop: the instructions that steer the model (its harness)
+  are not fixed — the system mines the agent's own failures and rewrites the harness to do better,
+  keeping only changes that measurably help.
 
 The two things you'll use most
   • Code   — an interactive coding agent that works in your current folder (writes files, runs
-             commands, fixes tests). Like Claude Code / Codex, but on GLM 5.2.
+             commands, fixes tests) with an in-CLI command palette and thread picker.
   • Loop   — the continuous self-improvement loop. It practices on a task corpus, learns from
              failures (including ones harvested from your real coding sessions), and evolves the
              harness. Runs in the background; safe to leave on.
@@ -50,15 +54,18 @@ Topics: overview, code, loop, console, settings, key, flywheel, safety, commands
     "code": """\
 Code — the interactive coding agent
   Run it:   self-harness code         (or pick [1] Code from the menu)
-  It opens a chat in your CURRENT directory. GLM 5.2 can read files, write files, and run shell
-  commands to accomplish what you ask — then verifies its own work.
+  It opens a chat in your CURRENT directory. The configured provider (GLM, codex, agy, or claude)
+  can read files, write files, and run shell commands to accomplish what you ask.
 
   In the chat:
     • Type plainly: "add a --json flag and run the tests".
     • @path/to/file        inline a file's contents into your message.
-    • /help                list in-chat commands
-    • /sessions, --resume  past sessions are saved; resume the most recent with `code --resume`.
-    • /exit                leave.
+    • /menu                open the TUI command palette.
+    • /model               pick provider/model/effort from inside the CLI.
+    • /threads             list, create, and switch conversation threads.
+    • /config              edit runtime options such as max steps, timeout, and harvesting.
+    • /status, /history    inspect the active thread and recent turns.
+    • /exit, /quit, /q     leave. Ctrl-C exits at the prompt; during a turn it interrupts.
 
   Auto-run: commands execute directly on your machine (no sandbox). Use it on code you trust.
   Flywheel: failing tests/builds it hits are harvested so the Loop can learn from them. By default
@@ -99,8 +106,9 @@ Settings — configuration without environment variables
     self-harness settings set <key> <value>
     self-harness settings path              print the config file location
   Stored in ~/.config/self-harness/config.json (owner-only, 0600).
-  Keys: api_key, base_url, model, max_steps, tool_timeout_seconds, auto_promote, harvest,
-        share_central_harness, loop_eval_repeats.
+  Keys: api_key, base_url, model, code_provider, code_model, code_effort, max_steps,
+        tool_timeout_seconds, auto_promote, harvest, share_central_harness, loop_eval_repeats.
+  `self-harness code` also exposes these through /menu, /model, and /config without leaving the TUI.
 """,
     "key": """\
 API key — connecting to GLM 5.2
@@ -205,7 +213,10 @@ def _render_help_body(body: str) -> None:
 _SETTING_LABELS = {
     "api_key": "GLM 5.2 API key",
     "base_url": "API base URL",
-    "model": "Model id",
+    "model": "Legacy model/provider id",
+    "code_provider": "Code: active provider (glm, codex, agy, claude)",
+    "code_model": "Code: provider model override",
+    "code_effort": "Code: reasoning effort override",
     "max_steps": "Coding agent: max steps per turn",
     "tool_timeout_seconds": "Coding agent: per-command timeout (s)",
     "auto_promote": "Loop: auto-integrate accepted edits into source",

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
+  <title id="title">SelfHarness architecture</title>
+  <desc id="desc">SelfHarness architecture showing interfaces, engine, adapters, audit artifacts, and provider backends.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#25413b"/>
+    </marker>
+    <style>
+      .bg{fill:#faf9f5}
+      .zone{fill:#ffffff;stroke:#d9d2c5;stroke-width:2}
+      .accent{fill:#edf6f3;stroke:#86a39a;stroke-width:2}
+      .warn{fill:#fff5df;stroke:#b89b56;stroke-width:2}
+      .title{font:700 34px Arial,sans-serif;fill:#17231f}
+      .label{font:700 18px Arial,sans-serif;fill:#17231f}
+      .body{font:400 15px Arial,sans-serif;fill:#47534f}
+      .tiny{font:400 12px Arial,sans-serif;fill:#67706c}
+      .arrow{fill:none;stroke:#25413b;stroke-width:3;marker-end:url(#arrow)}
+      .soft{fill:none;stroke:#9d958a;stroke-width:2;stroke-dasharray:7 7;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1200" height="680"/>
+  <text class="title" x="62" y="70">SelfHarness Architecture</text>
+  <text class="body" x="64" y="100">Interfaces drive a bounded evolution engine; adapters execute trusted tasks; audit and readiness artifacts carry the evidence trail.</text>
+
+  <rect class="accent" x="60" y="150" width="250" height="360" rx="8"/>
+  <text class="label" x="92" y="190">Operator Interfaces</text>
+  <rect class="zone" x="88" y="220" width="194" height="54" rx="6"/>
+  <text class="body" x="112" y="253">CLI commands</text>
+  <rect class="zone" x="88" y="292" width="194" height="54" rx="6"/>
+  <text class="body" x="112" y="325">Code TUI / threads</text>
+  <rect class="zone" x="88" y="364" width="194" height="54" rx="6"/>
+  <text class="body" x="112" y="397">Web console</text>
+  <rect class="zone" x="88" y="436" width="194" height="54" rx="6"/>
+  <text class="body" x="112" y="469">Release gates</text>
+
+  <rect class="zone" x="390" y="132" width="420" height="430" rx="8"/>
+  <text class="label" x="430" y="174">SelfHarness Engine</text>
+  <rect class="accent" x="430" y="210" width="150" height="72" rx="6"/>
+  <text class="body" x="456" y="242">Runner</text>
+  <text class="tiny" x="456" y="263">repeat-aware tasks</text>
+  <rect class="accent" x="620" y="210" width="150" height="72" rx="6"/>
+  <text class="body" x="646" y="242">Miner</text>
+  <text class="tiny" x="646" y="263">failure patterns</text>
+  <rect class="accent" x="430" y="322" width="150" height="72" rx="6"/>
+  <text class="body" x="456" y="354">Proposer</text>
+  <text class="tiny" x="456" y="375">bounded edits</text>
+  <rect class="accent" x="620" y="322" width="150" height="72" rx="6"/>
+  <text class="body" x="646" y="354">Validator</text>
+  <text class="tiny" x="646" y="375">split aggregates</text>
+  <rect class="warn" x="430" y="442" width="340" height="72" rx="6"/>
+  <text class="body" x="456" y="474">Promotion gate</text>
+  <text class="tiny" x="456" y="495">improve at least one split, regress neither</text>
+
+  <rect class="accent" x="890" y="150" width="250" height="160" rx="8"/>
+  <text class="label" x="924" y="190">Trusted Execution</text>
+  <text class="body" x="924" y="224">local subprocess</text>
+  <text class="body" x="924" y="250">Python verifier</text>
+  <text class="body" x="924" y="276">HTTP / container seams</text>
+
+  <rect class="warn" x="890" y="360" width="250" height="172" rx="8"/>
+  <text class="label" x="924" y="400">Evidence Artifacts</text>
+  <text class="body" x="924" y="434">audit JSONL</text>
+  <text class="body" x="924" y="460">readiness reports</text>
+  <text class="body" x="924" y="486">signed capture bundles</text>
+
+  <rect class="zone" x="390" y="594" width="420" height="54" rx="8"/>
+  <text class="body" x="426" y="627">Provider adapters: GLM 5.2, Codex headless, Agy, Claude, mock clients</text>
+
+  <path class="arrow" d="M310 330 H382"/>
+  <path class="arrow" d="M810 240 H882"/>
+  <path class="arrow" d="M810 448 H882"/>
+  <path class="soft" d="M600 562 V586"/>
+  <path class="soft" d="M1015 532 C1015 628 824 621 820 621"/>
+</svg>

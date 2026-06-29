@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="560" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Reproduction boundary</title>
+  <desc id="desc">A diagram separating local evidence from live benchmark reproduction claims.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#293f3a"/>
+    </marker>
+    <style>
+      .bg{fill:#fbfaf7}
+      .local{fill:#edf7f4;stroke:#7fa49a;stroke-width:2}
+      .live{fill:#fff1df;stroke:#b58a44;stroke-width:2}
+      .gate{fill:#ffffff;stroke:#d4ccc0;stroke-width:2}
+      .title{font:700 34px Arial,sans-serif;fill:#17231f}
+      .label{font:700 18px Arial,sans-serif;fill:#17231f}
+      .body{font:400 15px Arial,sans-serif;fill:#47534f}
+      .tiny{font:400 12px Arial,sans-serif;fill:#65706c}
+      .arrow{fill:none;stroke:#293f3a;stroke-width:3;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect class="bg" width="1200" height="560"/>
+  <text class="title" x="62" y="68">Reproduction Boundary</text>
+  <text class="body" x="64" y="98">Local proof can be strong without becoming a live Terminal-Bench reproduction claim.</text>
+
+  <rect class="local" x="70" y="150" width="300" height="300" rx="8"/>
+  <text class="label" x="106" y="192">Local Evidence</text>
+  <text class="body" x="106" y="228">deterministic demo</text>
+  <text class="body" x="106" y="256">focused tests</text>
+  <text class="body" x="106" y="284">offline fixtures</text>
+  <text class="body" x="106" y="312">audit verification</text>
+  <text class="body" x="106" y="340">release smoke</text>
+  <text class="tiny" x="106" y="388">Valuable for implementation quality.</text>
+
+  <rect class="gate" x="450" y="176" width="300" height="248" rx="8"/>
+  <text class="label" x="486" y="218">Admission Gate</text>
+  <text class="body" x="486" y="254">signed capture manifest</text>
+  <text class="body" x="486" y="282">artifact-class extraction</text>
+  <text class="body" x="486" y="310">bundle verification</text>
+  <text class="body" x="486" y="338">readiness matrix</text>
+  <text class="body" x="486" y="366">operator-owned evidence</text>
+
+  <rect class="live" x="830" y="150" width="300" height="300" rx="8"/>
+  <text class="label" x="866" y="192">Live Reproduction</text>
+  <text class="body" x="866" y="228">live Harbor artifacts</text>
+  <text class="body" x="866" y="256">paper model backend</text>
+  <text class="body" x="866" y="284">network-control evidence</text>
+  <text class="body" x="866" y="312">PyPI / Sigstore material</text>
+  <text class="body" x="866" y="340">fixed protocol binding</text>
+  <text class="tiny" x="866" y="388">Only this path can turn the claim true.</text>
+
+  <path class="arrow" d="M370 300 H442"/>
+  <path class="arrow" d="M750 300 H822"/>
+  <text class="label" x="452" y="500">Default local state: reproduction_claimed: false</text>
+</svg>

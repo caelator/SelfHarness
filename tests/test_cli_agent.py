@@ -8,7 +8,8 @@ from typing import Any
 from self_harness.adapters.agentic.agent_loop import run_agent_loop
 from self_harness.adapters.llm.messages import MessagesTurn
 from self_harness.cli_agent.harvest import FailureHarvester
-from self_harness.cli_agent.session import InteractiveSession, load_session_harness
+from self_harness.cli_agent.repl import run_repl
+from self_harness.cli_agent.session import HeadlessCliSession, InteractiveSession, load_session_harness
 from self_harness.harness import harness_hash, initial_harness
 from self_harness.task_sources import ingest_failing_bundle
 
@@ -193,6 +194,209 @@ def test_session_streaming_callbacks_and_tool_events(tmp_path: Path) -> None:
     # on_text_delta=None keeps the injected blocking transport, so we exercise on_tool_event only.
     session.send("go", on_tool_event=lambda n, s, ok: events.append((n, s, ok)))
     assert events == [("bash", "$ true", True)]
+
+
+def test_headless_codex_session_delegates_to_codex_exec(tmp_path: Path) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        """#!/bin/sh
+out=""
+printf '%s\\n' "$@" > args.txt
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    out="$1"
+  fi
+  shift || true
+done
+cat > prompt.txt
+printf '%s' "codex fixed it" > "$out"
+printf '%s\\n' '{"type":"turn.completed","usage":{"total_tokens":7}}'
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    h = FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path)
+    session = HeadlessCliSession(
+        backend="codex",
+        binary=str(fake),
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=h,
+        model="gpt-5.6",
+        effort="xhigh",
+    )
+
+    result = session.send("fix it")
+
+    assert result.stop_reason == "end_turn"
+    assert result.final_text == "codex fixed it"
+    assert result.usage == {"total_tokens": 7}
+    assert [m["role"] for m in session.history] == ["user", "assistant"]
+    assert "Current user request:\n\nfix it" in (tmp_path / "prompt.txt").read_text(encoding="utf-8")
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8")
+    assert "--model" in args
+    assert "gpt-5.6" in args
+    assert 'model_reasoning_effort="xhigh"' in args
+
+
+def test_headless_print_session_supports_agy_and_claude(tmp_path: Path) -> None:
+    fake = tmp_path / "headless"
+    fake.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$@" > args.txt
+cat > prompt.txt
+printf '%s\\n' "headless fixed it"
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    for backend in ("agy", "claude"):
+        h = FailureHarvester(inbox_dir=tmp_path / f"inbox-{backend}", workdir=tmp_path)
+        session = HeadlessCliSession(
+            backend=backend,
+            binary=str(fake),
+            workdir=tmp_path,
+            harness=initial_harness(),
+            harvester=h,
+            model=f"{backend}-model",
+            effort="high",
+        )
+        result = session.send(f"fix with {backend}")
+        assert result.stop_reason == "end_turn"
+        assert result.final_text == "headless fixed it"
+        assert session.history[-2]["content"] == f"fix with {backend}"
+        args = (tmp_path / "args.txt").read_text(encoding="utf-8")
+        assert f"{backend}-model" in args
+        if backend == "claude":
+            assert "--effort" in args
+            assert "high" in args
+
+
+def test_repl_model_command_changes_headless_model_and_effort(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    fake = tmp_path / "codex"
+    fake.write_text(
+        """#!/bin/sh
+out=""
+printf '%s\\n' "$@" > args.txt
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    out="$1"
+  fi
+  shift || true
+done
+cat > prompt.txt
+printf '%s' "model command ok" > "$out"
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("SELF_HARNESS_CODEX_BINARY", str(fake))
+    lines = iter(["/model codex gpt 5.6 extra high", "hello", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = HeadlessCliSession(
+        backend="codex",
+        binary=str(fake),
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    assert run_repl(session, banner=False, root=None, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "provider: codex, model: gpt-5.6, effort: xhigh" in out
+    assert "codex › model command ok" in out
+    args = (tmp_path / "args.txt").read_text(encoding="utf-8")
+    assert "gpt-5.6" in args
+    assert 'model_reasoning_effort="xhigh"' in args
+    from self_harness import user_config
+
+    cfg = user_config.load_config()
+    assert cfg.get("code_provider") == "codex"
+    assert cfg.get("code_model") == "gpt-5.6"
+    assert cfg.get("code_effort") == "xhigh"
+
+
+def test_repl_command_palette_can_exit(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    lines = iter(["/menu", "0"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    assert run_repl(session, banner=False, root=tmp_path, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "SelfHarness Command Palette" in out
+    assert "Exit SelfHarness Code" in out
+
+
+def test_repl_config_palette_updates_runtime_defaults(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    lines = iter(["/config", "1", "7", "/status", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    assert run_repl(session, banner=False, root=tmp_path, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "Runtime Config" in out
+    assert "max steps: 7" in out
+    from self_harness import user_config
+
+    assert user_config.load_config().get("max_steps") == 7
+
+
+def test_repl_thread_switch_uses_saved_session(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    from self_harness.cli_agent.sessions import SessionRecord, save_session
+
+    save_session(
+        tmp_path,
+        SessionRecord(
+            id="code-old",
+            workdir=str(tmp_path),
+            harness_hash="abc",
+            updated_at="t9",
+            history=[{"role": "user", "content": "old"}],
+            turns=[{"user": "old", "stop_reason": "end_turn"}],
+        ),
+    )
+    lines = iter(["/thread switch code-old", "/status", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    assert run_repl(session, banner=False, root=tmp_path, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "switched to thread code-old" in out
+    assert "thread: code-old" in out
+    assert session.history == [{"role": "user", "content": "old"}]
 
 
 # ---- @file context expansion ------------------------------------------------------------------------
