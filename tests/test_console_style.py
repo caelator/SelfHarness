@@ -47,7 +47,13 @@ def test_color_mode_emits_ansi() -> None:
     from rich.theme import Theme
 
     buf = io.StringIO()
-    rich_console = Console(file=buf, force_terminal=True, theme=Theme(console_style.STYLES), width=80)
+    rich_console = Console(
+        file=buf,
+        force_terminal=True,
+        color_system="standard",
+        theme=Theme(console_style.STYLES),
+        width=80,
+    )
     c = console_style.Style(force_plain=False)
     c._console = rich_console
     c.plain = False

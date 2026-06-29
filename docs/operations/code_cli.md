@@ -5,8 +5,9 @@
 - The chat plane sends normal text to the configured coding backend.
 - The control plane handles slash commands locally before anything reaches the backend.
 
-Use `/menu` whenever you do not remember a command. It opens the command palette with numbered
-selection controls for the major functions.
+Type `/` at the prompt to open the slash-command menu. Use Up/Down to move through commands, then
+Enter to accept the highlighted command. Continue typing, such as `/mo`, to filter the list. `/menu`
+also opens the command palette with numbered selection controls for the major functions.
 
 ## Provider And Model
 

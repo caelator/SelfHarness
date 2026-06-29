@@ -668,8 +668,9 @@ self-harness code                      # in your project directory
 self-harness code --resume             # continue your most recent session
 ```
 
-Inside the TUI, type `/menu` to open the command palette. The palette reaches
-the same controls as the slash commands:
+Inside the TUI, type `/` to open the slash-command menu, use Up/Down to choose
+a command, and press Enter to accept it. `/menu` opens the command palette; the
+palette reaches the same controls as the slash commands:
 
 ```text
 /menu                         open the command palette
@@ -718,10 +719,9 @@ Threads persist under `runs/sessions/` and can be resumed at startup with
 commands directly on the host (no container) — use it on repos you trust.
 See `docs/operations/code_cli.md` for the complete control-plane reference.
 
-> `self-harness code` is the one component with a third-party runtime dependency
-> (`rich`, for the terminal UI). It is imported lazily and only by the CLI's UI
-> module, so the library, engine, and web console still import with zero
-> third-party runtime dependencies.
+> `self-harness code` is the one component with terminal-specific runtime
+> dependencies: `rich` for rendering and `prompt_toolkit` for slash-command
+> selection. They are imported lazily by the CLI UI module.
 
 ## Operator Console
 

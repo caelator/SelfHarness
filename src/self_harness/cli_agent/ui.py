@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from self_harness.console_style import STYLES
@@ -48,15 +49,100 @@ _OK = STYLES["success"]
 _ERR = STYLES["error"]
 _HEAD = STYLES["heading"]
 
+SlashCommand = tuple[str, str]
+
+
+def slash_command_matches(text_before_cursor: str, commands: Sequence[SlashCommand]) -> list[SlashCommand]:
+    """Return slash commands matching the current prompt prefix.
+
+    ``/`` returns every command, ``/m`` filters by prefix, and text containing a space is treated as an
+    in-progress command argument rather than another command lookup.
+    """
+
+    prefix = _slash_command_prefix(text_before_cursor)
+    if prefix is None:
+        return []
+    return [(command, description) for command, description in commands if command.startswith(prefix)]
+
+
+def _slash_command_prefix(text_before_cursor: str) -> str | None:
+    if not text_before_cursor.startswith("/"):
+        return None
+    if any(char.isspace() for char in text_before_cursor):
+        return None
+    return text_before_cursor
+
+
+def _build_prompt_session(commands: Sequence[SlashCommand]) -> Any | None:
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import Completer, Completion
+        from prompt_toolkit.document import Document
+        from prompt_toolkit.filters import has_completions
+        from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.shortcuts import CompleteStyle
+    except Exception:  # noqa: BLE001 - optional terminal enhancement; stdlib input remains valid.
+        return None
+
+    class SlashCommandCompleter(Completer):
+        def get_completions(self, document: Document, complete_event: Any) -> Any:
+            del complete_event
+            prefix = _slash_command_prefix(document.text_before_cursor)
+            if prefix is None:
+                return
+            for command, description in slash_command_matches(document.text_before_cursor, commands):
+                yield Completion(command, start_position=-len(prefix), display=command, display_meta=description)
+
+    bindings = KeyBindings()
+
+    @bindings.add("/")
+    def _slash(event: Any) -> None:
+        buffer = event.current_buffer
+        buffer.insert_text("/")
+        if buffer.document.text_before_cursor == "/":
+            buffer.start_completion(select_first=True)
+
+    @bindings.add("down", filter=has_completions)
+    def _down(event: Any) -> None:
+        event.current_buffer.complete_next()
+
+    @bindings.add("up", filter=has_completions)
+    def _up(event: Any) -> None:
+        event.current_buffer.complete_previous()
+
+    @bindings.add("enter", filter=has_completions)
+    def _enter(event: Any) -> None:
+        buffer = event.current_buffer
+        complete_state = buffer.complete_state
+        if complete_state is not None and complete_state.current_completion is not None:
+            buffer.apply_completion(complete_state.current_completion)
+        buffer.validate_and_handle()
+
+    return PromptSession(
+        completer=SlashCommandCompleter(),
+        complete_style=CompleteStyle.MULTI_COLUMN,
+        complete_while_typing=True,
+        key_bindings=bindings,
+        reserve_space_for_menu=8,
+    )
+
 
 class ConsoleRenderer:
     """Streamed rich UI with a plain fallback. One renderer per session."""
 
-    def __init__(self, *, plain: bool = False, assistant_label: str = "agent") -> None:
+    def __init__(
+        self,
+        *,
+        plain: bool = False,
+        assistant_label: str = "agent",
+        slash_commands: Sequence[SlashCommand] = (),
+    ) -> None:
         # Fall back to plain output when asked, or when stdout is not a TTY (pipes, tests, CI).
         self.plain = plain or not sys.stdout.isatty()
         self.assistant_label = assistant_label
+        self._slash_commands = tuple(slash_commands)
         self._console: Any = None
+        self._prompt_session: Any = None
         self._live: Any = None
         self._heartbeat: Any = None  # _Heartbeat renderable driving the "Working…" line
         self._buffer = ""
@@ -70,6 +156,8 @@ class ConsoleRenderer:
                 self._console = Console()
             except Exception:  # noqa: BLE001 - any rich import/init issue degrades to plain, never crashes.
                 self.plain = True
+        if not self.plain and self._slash_commands:
+            self._prompt_session = _build_prompt_session(self._slash_commands)
 
     # -- session chrome ---------------------------------------------------------------------------
 
@@ -113,10 +201,17 @@ class ConsoleRenderer:
             self._console.clear()
 
     def prompt(self) -> str:
-        # input() works in both modes; rich's console.input would break piped-stdin tests, so style the
-        # label ourselves and read with stdlib input.
+        # Plain mode keeps stdlib input for piped-stdin tests. Interactive TTY mode uses prompt_toolkit
+        # so typing "/" opens a command menu that Up/Down can navigate.
         if self.plain or self._console is None:
             return input("you › ")
+        if self._prompt_session is not None:
+            try:
+                return str(self._prompt_session.prompt("you › "))
+            except (EOFError, KeyboardInterrupt):
+                raise
+            except Exception:  # noqa: BLE001 - if prompt_toolkit has a terminal issue, fall back to input.
+                self._prompt_session = None
         self._console.print("you › ", style=_USER, end="")
         return input()
 

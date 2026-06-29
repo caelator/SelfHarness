@@ -51,6 +51,34 @@ _EFFORT_ALIASES = {
     "max": "max",
 }
 
+_SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("/menu", "open the command palette"),
+    ("/commands", "open the command palette"),
+    ("/palette", "open the command palette"),
+    ("/help", "show command help"),
+    ("/model", "switch provider, model, and effort"),
+    ("/provider", "switch provider"),
+    ("/backend", "switch provider"),
+    ("/effort", "switch reasoning effort"),
+    ("/threads", "open the thread picker"),
+    ("/thread", "thread actions: list, new, switch"),
+    ("/sessions", "list saved sessions"),
+    ("/status", "show runtime status"),
+    ("/config", "edit runtime settings"),
+    ("/history", "show recent turns"),
+    ("/harness", "show active harness hash"),
+    ("/harvested", "list harvested failure bundles"),
+    ("/cwd", "show working directory"),
+    ("/clear", "clear the terminal"),
+    ("/reset", "clear current thread history"),
+    ("/save", "save the current thread"),
+    ("/stop", "explain turn interruption"),
+    ("/interrupt", "explain turn interruption"),
+    ("/exit", "save and exit"),
+    ("/quit", "save and exit"),
+    ("/q", "save and exit"),
+)
+
 _HELP = """\
 Commands:
   /menu        open the TUI command palette
@@ -89,7 +117,7 @@ def run_repl(
     record. ``plain`` forces the plain-text renderer.
     """
 
-    renderer = ConsoleRenderer(plain=plain, assistant_label=_assistant_label(session))
+    renderer = ConsoleRenderer(plain=plain, assistant_label=_assistant_label(session), slash_commands=_SLASH_COMMANDS)
     record = SessionRecord(
         id=session_id,
         workdir=str(session.workdir),

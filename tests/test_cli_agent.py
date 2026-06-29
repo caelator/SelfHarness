@@ -538,3 +538,22 @@ def test_heartbeat_renderable_clock_advances() -> None:
     text = hb.render_plain()
     assert "1m 15s" in text
     assert "3.5k tokens" in text
+
+
+def test_slash_command_matches_all_and_filters_prefix() -> None:
+    from self_harness.cli_agent.ui import slash_command_matches
+
+    commands = (("/menu", "palette"), ("/model", "model picker"), ("/threads", "thread picker"))
+
+    assert [command for command, _ in slash_command_matches("/", commands)] == ["/menu", "/model", "/threads"]
+    assert [command for command, _ in slash_command_matches("/mo", commands)] == ["/model"]
+    assert slash_command_matches("hello /", commands) == []
+    assert slash_command_matches("/model ", commands) == []
+
+
+def test_slash_prompt_session_builds_when_toolkit_is_available() -> None:
+    from self_harness.cli_agent.ui import _build_prompt_session
+
+    session = _build_prompt_session((("/menu", "palette"),))
+
+    assert session is not None
