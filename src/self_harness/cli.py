@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+from self_harness import __version__
 from self_harness.adapters.container_preflight import run_container_preflight
 from self_harness.adapters.container_verifier import (
     ContainerMode,
@@ -329,6 +330,7 @@ def main(argv: list[str] | None = None) -> int:
             "Run with no command for an interactive menu, or `self-harness help` for a guide."
         ),
     )
+    parser.add_argument("--version", action="version", version=f"self-harness {__version__}")
     # Subcommand is OPTIONAL: bare `self-harness` opens the interactive home menu.
     subparsers = parser.add_subparsers(dest="command", required=False)
 

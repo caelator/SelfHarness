@@ -103,7 +103,7 @@ def run_vulnerability_check(
             raise VulnerabilityPolicyError("--freshness-policy is only valid with --format trivy --audit-json")
         wheel_path = _resolve_wheel(wheel)
         requirements = runtime_requirements_from_wheel(wheel_path)
-        findings = _audit_requirements(requirements, python=python)
+        findings = _audit_wheel_runtime_tree(wheel_path, requirements, python=python)
         source = str(wheel_path.resolve())
     decisions = evaluate_vulnerability_policy(policy, findings, today=_parse_today(today))
     return vulnerability_report(
@@ -179,12 +179,34 @@ def _runtime_requirement(raw_requirement: str) -> str | None:
     return str(requirement)
 
 
-def _audit_requirements(requirements: tuple[str, ...], *, python: str) -> tuple[VulnerabilityFinding, ...]:
+def _audit_wheel_runtime_tree(
+    wheel: Path,
+    requirements: tuple[str, ...],
+    *,
+    python: str,
+) -> tuple[VulnerabilityFinding, ...]:
     if not requirements:
         return ()
     with tempfile.TemporaryDirectory(prefix="self-harness-vuln-check-") as tmp:
-        requirement_path = Path(tmp) / "requirements.txt"
-        requirement_path.write_text("".join(f"{requirement}\n" for requirement in requirements), encoding="utf-8")
+        target_path = Path(tmp) / "target"
+        install = subprocess.run(
+            [
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--target",
+                str(target_path),
+                "--only-binary=:all:",
+                "--upgrade",
+                str(wheel),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if install.returncode != 0:
+            raise VulnerabilityPolicyError(_subprocess_error("wheel runtime dependency install", install))
         completed = subprocess.run(
             [
                 python,
@@ -192,8 +214,8 @@ def _audit_requirements(requirements: tuple[str, ...], *, python: str) -> tuple[
                 "pip_audit",
                 "--format",
                 "json",
-                "-r",
-                str(requirement_path),
+                "--path",
+                str(target_path),
             ],
             text=True,
             capture_output=True,
@@ -213,9 +235,14 @@ def _audit_requirements(requirements: tuple[str, ...], *, python: str) -> tuple[
 
 
 def _pip_audit_error(completed: subprocess.CompletedProcess[str]) -> str:
+    return _subprocess_error("pip-audit", completed)
+
+
+def _subprocess_error(label: str, completed: subprocess.CompletedProcess[str]) -> str:
     stderr = completed.stderr.replace("\r", " ").replace("\n", " ").strip()
-    detail = stderr[:300] if stderr else f"exit_status={completed.returncode}"
-    return f"pip-audit failed: {detail}"
+    stdout = completed.stdout.replace("\r", " ").replace("\n", " ").strip()
+    detail = stderr or stdout or f"exit_status={completed.returncode}"
+    return f"{label} failed: {detail[:600]}"
 
 
 def _resolve_wheel(explicit: Path | None) -> Path:

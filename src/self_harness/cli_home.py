@@ -497,7 +497,7 @@ def _menu_save_project() -> None:
         notes = ""
 
     # Load harness state if available
-    harness_state: dict | None = None
+    harness_state: dict[str, Any] | None = None
     runs_dir = central_runs_dir()
     if runs_dir and runs_dir is not None:
         state_file = runs_dir / "harness_state.json"

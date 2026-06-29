@@ -958,7 +958,8 @@ the operator pre-capture plan authoring, signed verification, synthetic bundle
 rehearsal, and post-capture plan-vs-bundle diff contracts. They are standalone
 advisory gates and do not claim benchmark reproduction.
 `make smoke` builds the wheel and installs it into an isolated environment,
-then runs the installed CLI, checks the canonical audit hash, and writes
+then runs the installed CLI, verifies the installed package can reproduce the
+canonical Figure 3 audit hash, and writes
 `dist/self-harness-release-smoke.json`. `make release-smoke` combines the
 source gates, readiness gate, build, release-candidate evidence, and wheel
 smoke check.

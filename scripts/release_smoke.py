@@ -163,8 +163,8 @@ def main(argv: list[str] | None = None) -> int:
             _record(
                 checks,
                 "canonical_audit_hash_compare",
-                "installed demo audit tree hash matches the canonical fixture",
-                lambda: _assert_canonical_audit_hash(python, demo_dir, clean_env, expected_hash),
+                "installed package reproduces the canonical Figure 3 audit hash",
+                lambda: _assert_canonical_audit_hash(python, tmp_path / "canonical", clean_env, expected_hash),
             )
     except ReleaseSmokeStepError:
         payload = _status_payload(ok=False, checks=checks)
@@ -307,7 +307,7 @@ def _assert_audit_summary_boundary(cli: Path, demo_dir: Path, env: dict[str, str
 
 def _assert_canonical_audit_hash(
     python: Path,
-    demo_dir: Path,
+    canonical_dir: Path,
     env: dict[str, str],
     expected_hash: str,
 ) -> None:
@@ -317,8 +317,22 @@ def _assert_canonical_audit_hash(
             "-c",
             (
                 "from pathlib import Path; "
-                "from self_harness import audit_tree_hash; "
-                f"print(audit_tree_hash(Path({str(demo_dir)!r})))"
+                "from self_harness import EngineConfig, SelfHarnessEngine, audit_tree_hash, "
+                "figure_3_harness, write_audit_trajectory; "
+                "from self_harness.demo import DeterministicRunner, demo_tasks; "
+                "from self_harness.proposer import HeuristicProposer; "
+                f"out_dir = Path({str(canonical_dir)!r}); "
+                "engine = SelfHarnessEngine("
+                "tasks=demo_tasks(), "
+                "runner=DeterministicRunner(seed=0), "
+                "proposer=HeuristicProposer(), "
+                "out_dir=out_dir, "
+                "config=EngineConfig(rounds=1, seed=0), "
+                "initial_spec=figure_3_harness(), "
+                "); "
+                "engine.run(); "
+                "write_audit_trajectory(out_dir); "
+                "print(audit_tree_hash(out_dir))"
             ),
         ],
         env=env,

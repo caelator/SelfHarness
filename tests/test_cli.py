@@ -7,6 +7,14 @@ from self_harness.cli import main
 from self_harness.corpus_signing import PASSPHRASE_ERROR
 
 
+def test_cli_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.startswith("self-harness ")
+
+
 def test_demo_cli_wires_runtime_config(tmp_path: Path) -> None:
     out_dir = tmp_path / "demo"
 

@@ -18,10 +18,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from self_harness.evaluation import EvaluationResult
 from self_harness.proposer_policy import ADDRESSABLE_SURFACE_BY_MECHANISM
 from self_harness.types import (
     AcceptDecision,
+    EvaluationResult,
     FailurePattern,
     HarnessPatch,
     HarnessSpec,
