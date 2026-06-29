@@ -17,6 +17,7 @@ from self_harness import user_config
 from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
 from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
 from self_harness.cli_agent.context import expand_mentions
+from self_harness.cli_agent.model_discovery import ModelCatalog, discover_provider_models
 from self_harness.cli_agent.session import HeadlessCliSession, InteractiveSession, headless_binary_for_backend
 from self_harness.cli_agent.sessions import SessionRecord, list_sessions, load_session, save_session
 from self_harness.cli_agent.ui import ConsoleRenderer
@@ -510,8 +511,10 @@ def _model_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSessi
         except ValueError as exc:
             renderer.error(f"  ! {exc}")
             return session
-    current_model = getattr(session, "model", None)
-    model = renderer.ask("model (blank = provider default)", default=current_model or "").strip() or None
+    selected_model, model_cancelled = _model_picker(provider, session, renderer)
+    if model_cancelled:
+        return session
+    model = selected_model
     effort = getattr(session, "effort", None)
     if provider in {"codex", "claude"}:
         selected_effort = _effort_picker(session, renderer, current=effort)
@@ -523,6 +526,64 @@ def _model_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSessi
     _persist_code_selection(selected)
     renderer.info(_model_status(selected))
     return selected
+
+
+def _model_picker(provider: str, session: CodeSession, renderer: ConsoleRenderer) -> tuple[str | None, bool]:
+    current_model = getattr(session, "model", None) if _provider(session) == provider else None
+    binary = headless_binary_for_backend(provider) if provider in {"codex", "agy", "claude"} else None
+    catalog = discover_provider_models(provider, binary=binary)
+    options, model_by_choice = _model_options(catalog, current_model=current_model)
+    renderer.menu(
+        f"{provider.upper()} Models",
+        options,
+        footer=_model_picker_footer(catalog, current_model=current_model),
+    )
+    choice = renderer.ask("model").strip()
+    if not choice:
+        return None, False
+    lowered = choice.lower()
+    if lowered == "0":
+        return None, True
+    if lowered in {"d", "default"}:
+        return None, False
+    if lowered in {"c", "custom"}:
+        value = renderer.ask("custom model id").strip()
+        return (value or None), False
+    if choice in model_by_choice:
+        return model_by_choice[choice], False
+    renderer.error(f"  ! unknown model choice: {choice}")
+    return None, True
+
+
+def _model_options(
+    catalog: ModelCatalog,
+    *,
+    current_model: object,
+) -> tuple[list[tuple[str, str]], dict[str, str]]:
+    model_by_choice: dict[str, str] = {}
+    options: list[tuple[str, str]] = []
+    current = current_model if isinstance(current_model, str) and current_model else ""
+    models = list(catalog.models)
+    if current and current not in models:
+        models.insert(0, current)
+    for index, model in enumerate(models, start=1):
+        model_by_choice[str(index)] = model
+        options.append((str(index), f"{model}{' (current)' if model == current else ''}"))
+    options.extend(
+        [
+            ("d", "Provider default / clear model override"),
+            ("c", "Custom model id"),
+            ("0", "Cancel"),
+        ]
+    )
+    return options, model_by_choice
+
+
+def _model_picker_footer(catalog: ModelCatalog, *, current_model: object) -> str:
+    current = current_model if isinstance(current_model, str) and current_model else "provider default"
+    if catalog.models:
+        return f"source: {catalog.source}; current: {current}"
+    return f"could not query live model catalog ({catalog.error or 'unknown error'}); current: {current}"
 
 
 def _effort_picker(

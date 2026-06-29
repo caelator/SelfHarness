@@ -27,6 +27,11 @@ Supported providers:
 - `agy`: local `agy --print` in headless mode.
 - `claude`: local `claude --print` in headless mode.
 
+After a provider is selected, the model picker queries the provider's live catalog and displays the
+returned models. It uses `agy models` for Agy, Z.ai's coding-plan `/models` endpoint for GLM, and the
+OpenAI/Anthropic model APIs for Codex/Claude when those API keys are available. If discovery is not
+available, choose `custom` to enter a model id without leaving the TUI.
+
 Persistent defaults:
 
 ```bash

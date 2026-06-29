@@ -325,6 +325,137 @@ printf '%s' "model command ok" > "$out"
     assert cfg.get("code_effort") == "xhigh"
 
 
+class ScriptedRenderer:
+    def __init__(self, answers: Sequence[str]) -> None:
+        self.answers = iter(answers)
+        self.menus: list[tuple[str, list[tuple[str, str]], str]] = []
+        self.prompts: list[str] = []
+        self.infos: list[str] = []
+        self.errors: list[str] = []
+
+    def menu(self, title: str, options: list[tuple[str, str]], *, footer: str = "") -> None:
+        self.menus.append((title, options, footer))
+
+    def ask(self, label: str, *, default: str | None = None) -> str:
+        del default
+        self.prompts.append(label)
+        return next(self.answers)
+
+    def info(self, text: str) -> None:
+        self.infos.append(text)
+
+    def error(self, text: str) -> None:
+        self.errors.append(text)
+
+
+def test_model_palette_queries_provider_models(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness import user_config
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import ModelCatalog
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_discover(provider: str, *, binary: str | None = None) -> ModelCatalog:
+        calls.append((provider, binary))
+        return ModelCatalog(("gpt-live-a", "gpt-live-b"), "fake live catalog")
+
+    monkeypatch.setattr(repl, "discover_provider_models", fake_discover)
+    renderer = ScriptedRenderer(["1", "2", "0"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._model_palette(session, renderer)
+
+    assert isinstance(selected, HeadlessCliSession)
+    assert selected.model == "gpt-live-b"
+    assert calls == [("codex", "codex")]
+    assert renderer.prompts == ["provider", "model", "effort"]
+    assert renderer.menus[1][0] == "CODEX Models"
+    assert ("2", "gpt-live-b") in renderer.menus[1][1]
+    assert "source: fake live catalog" in renderer.menus[1][2]
+    assert user_config.load_config().get("code_model") == "gpt-live-b"
+
+
+def test_model_palette_allows_custom_model_when_discovery_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import ModelCatalog
+
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_models",
+        lambda provider, *, binary=None: ModelCatalog((), "fake live catalog", "provider unavailable"),
+    )
+    renderer = ScriptedRenderer(["1", "c", "gpt-from-future", "0"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._model_palette(session, renderer)
+
+    assert isinstance(selected, HeadlessCliSession)
+    assert selected.model == "gpt-from-future"
+    assert "could not query live model catalog (provider unavailable)" in renderer.menus[1][2]
+
+
+def test_provider_model_discovery_reads_native_cli_catalog(tmp_path: Path) -> None:
+    from self_harness.cli_agent.model_discovery import discover_provider_models
+
+    fake = tmp_path / "agy"
+    fake.write_text(
+        """#!/bin/sh
+if [ "$1" = "models" ]; then
+  printf '%s\\n' "Gemini 3.5 Flash (Medium)" "Claude Sonnet 4.6 (Thinking)"
+  exit 0
+fi
+exit 2
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    catalog = discover_provider_models("agy", binary=str(fake))
+
+    assert catalog.models == ("Gemini 3.5 Flash (Medium)", "Claude Sonnet 4.6 (Thinking)")
+    assert catalog.error is None
+
+
+def test_provider_model_discovery_does_not_call_unsupported_cli_catalogs(tmp_path: Path) -> None:
+    from self_harness.cli_agent.model_discovery import discover_provider_models
+
+    marker = tmp_path / "called"
+    fake = tmp_path / "codex"
+    fake.write_text(
+        f"""#!/bin/sh
+touch {marker}
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    catalog = discover_provider_models("codex", binary=str(fake), env={})
+
+    assert catalog.models == ()
+    assert "OPENAI_API_KEY is not set" == catalog.error
+    assert not marker.exists()
+
+
 def test_repl_command_palette_can_exit(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
     lines = iter(["/menu", "0"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
