@@ -190,6 +190,32 @@ def _headless_binary_for_backend(backend: str) -> str:
     return backend
 
 
+def _served_code_model_or_default(
+    provider: str,
+    model: str | None,
+    *,
+    binary: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Keep a saved model override only when the provider's live catalog serves it.
+
+    Discovery is best-effort. If a provider cannot enumerate models, preserve the override so custom or
+    private model ids still work. If it can enumerate and the saved override is absent, drop it rather
+    than starting a provider with another provider's stale model id.
+    """
+
+    if not model:
+        return None, None
+    from self_harness.cli_agent.model_discovery import discover_provider_models
+
+    catalog = discover_provider_models(provider, binary=binary)
+    if catalog.models and model not in catalog.models:
+        return (
+            None,
+            f"configured model {model!r} is not served by {provider} ({catalog.source}); using provider default",
+        )
+    return model, None
+
+
 def run_code_default() -> int:
     """Launch the coding agent with sensible defaults (used by the home menu / bare flow).
 
@@ -1916,6 +1942,8 @@ def _run_code(
     model = user_config.resolve_code_model(provider=provider, config=cfg)
     effort = user_config.resolve_code_effort(provider=provider, config=cfg)
     headless_backend = None if provider == "glm" else _headless_backend_for_model(provider)
+    model_binary = _headless_binary_for_backend(headless_backend) if headless_backend is not None else None
+    model, model_warning = _served_code_model_or_default(provider, model, binary=model_binary)
     api_key = ""
     base_url = ""
     if headless_backend is None:
@@ -1928,12 +1956,14 @@ def _run_code(
 
     for line in HOST_EXEC_WARNING_LINES:
         print(line)
+    if model_warning is not None:
+        print(f"warning: {model_warning}")
     if headless_backend is not None:
         model_text = model or "provider default"
         effort_text = effort or "provider default"
         print(
             f"main coding backend: {headless_backend} headless CLI "
-            f"({_headless_binary_for_backend(headless_backend)}), model: {model_text}, effort: {effort_text}"
+            f"({model_binary}), model: {model_text}, effort: {effort_text}"
         )
     else:
         print(f"main coding backend: GLM via Z.ai ({model or user_config.DEFAULT_MODEL})")

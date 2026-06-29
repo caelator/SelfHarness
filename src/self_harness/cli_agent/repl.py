@@ -564,7 +564,7 @@ def _model_options(
     options: list[tuple[str, str]] = []
     current = current_model if isinstance(current_model, str) and current_model else ""
     models = list(catalog.models)
-    if current and current not in models:
+    if current and current not in models and not catalog.models:
         models.insert(0, current)
     for index, model in enumerate(models, start=1):
         model_by_choice[str(index)] = model
@@ -582,6 +582,8 @@ def _model_options(
 def _model_picker_footer(catalog: ModelCatalog, *, current_model: object) -> str:
     current = current_model if isinstance(current_model, str) and current_model else "provider default"
     if catalog.models:
+        if current != "provider default" and current not in catalog.models:
+            return f"source: {catalog.source}; ignored incompatible current override: {current}"
         return f"source: {catalog.source}; current: {current}"
     return f"could not query live model catalog ({catalog.error or 'unknown error'}); current: {current}"
 

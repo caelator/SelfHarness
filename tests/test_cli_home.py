@@ -94,6 +94,22 @@ def test_legacy_model_codex_selects_headless_provider(cfg_home: Path) -> None:
     assert user_config.resolve_code_provider(config=user_config.load_config()) == "codex"
 
 
+def test_code_startup_drops_model_not_served_by_provider(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from self_harness import cli
+    from self_harness.cli_agent.model_discovery import ModelCatalog
+
+    monkeypatch.setattr(
+        "self_harness.cli_agent.model_discovery.discover_provider_models",
+        lambda provider, *, binary=None: ModelCatalog(("glm-5.1", "glm-5.2"), "Z.ai /models"),
+    )
+
+    model, warning = cli._served_code_model_or_default("glm", "gpt-5.6")
+
+    assert model is None
+    assert warning is not None
+    assert "gpt-5.6" in warning
+
+
 def test_loop_eval_repeats_resolution(cfg_home: Path) -> None:
     from self_harness import cli
 

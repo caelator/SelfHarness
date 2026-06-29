@@ -413,6 +413,22 @@ def test_model_palette_allows_custom_model_when_discovery_fails(
     assert "could not query live model catalog (provider unavailable)" in renderer.menus[1][2]
 
 
+def test_model_options_do_not_offer_incompatible_current_model() -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import ModelCatalog
+
+    options, model_by_choice = repl._model_options(
+        ModelCatalog(("glm-5.1", "glm-5.2"), "Z.ai /models"),
+        current_model="gpt-5.6",
+    )
+
+    labels = [label for _, label in options]
+    assert "gpt-5.6 (current)" not in labels
+    assert model_by_choice == {"1": "glm-5.1", "2": "glm-5.2"}
+    assert ("1", "glm-5.1") in options
+    assert ("2", "glm-5.2") in options
+
+
 def test_provider_model_discovery_reads_native_cli_catalog(tmp_path: Path) -> None:
     from self_harness.cli_agent.model_discovery import discover_provider_models
 
@@ -452,8 +468,30 @@ exit 0
     catalog = discover_provider_models("codex", binary=str(fake), env={})
 
     assert catalog.models == ()
-    assert "OPENAI_API_KEY is not set" == catalog.error
+    assert "OPENAI_API_KEY is not set" in str(catalog.error)
     assert not marker.exists()
+
+
+def test_provider_model_discovery_reads_codex_cache(tmp_path: Path) -> None:
+    from self_harness.cli_agent.model_discovery import discover_provider_models
+
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {"slug": "gpt-codex-live", "display_name": "GPT Codex Live"},
+                    {"slug": "gpt-codex-mini", "display_name": "GPT Codex Mini"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = discover_provider_models("codex", env={"CODEX_HOME": str(tmp_path)})
+
+    assert catalog.models == ("gpt-codex-live", "gpt-codex-mini")
+    assert catalog.source == "Codex models cache"
+    assert catalog.error is None
 
 
 def test_repl_command_palette_can_exit(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]

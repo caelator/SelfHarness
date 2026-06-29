@@ -29,8 +29,9 @@ Supported providers:
 
 After a provider is selected, the model picker queries the provider's live catalog and displays the
 returned models. It uses `agy models` for Agy, Z.ai's coding-plan `/models` endpoint for GLM, and the
-OpenAI/Anthropic model APIs for Codex/Claude when those API keys are available. If discovery is not
-available, choose `custom` to enter a model id without leaving the TUI.
+server-provided Codex model cache for Codex. Codex can also fall back to OpenAI `/v1/models`; Claude
+uses Anthropic `/v1/models` when `ANTHROPIC_API_KEY` is available. If discovery is not available,
+choose `custom` to enter a model id without leaving the TUI.
 
 Persistent defaults:
 

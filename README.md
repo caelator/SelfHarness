@@ -694,9 +694,10 @@ Ctrl-C                        at prompt: exit; during a turn: interrupt and retu
 When `/model` or `/provider` opens the provider picker, the next screen queries
 that provider's currently served model catalog instead of using a checked-in
 model list. Agy is discovered through `agy models`; GLM/Z.ai is discovered from
-Z.ai's live coding-plan `/models` endpoint; Codex and Claude use the
-OpenAI/Anthropic model APIs when the corresponding API key is available. If a
-catalog cannot be queried, the picker says why and offers a custom model id.
+Z.ai's live coding-plan `/models` endpoint; Codex reads the server-provided
+Codex model cache and can fall back to OpenAI `/v1/models`; Claude uses the
+Anthropic model API when `ANTHROPIC_API_KEY` is available. If a catalog cannot
+be queried, the picker says why and offers a custom model id.
 
 Provider defaults can also be set before launch:
 

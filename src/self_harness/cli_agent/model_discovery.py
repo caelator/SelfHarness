@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
@@ -44,7 +45,10 @@ def discover_provider_models(
             _query_cli_models(binary or "agy", timeout_seconds=timeout_seconds, env=source_env),
         )
     if normalized == "codex":
-        return _query_openai_models(timeout_seconds=timeout_seconds, env=source_env)
+        return _first_catalog(
+            _query_codex_models_cache(env=source_env, use_user_home=env is None),
+            _query_openai_models(timeout_seconds=timeout_seconds, env=source_env),
+        )
     if normalized == "claude":
         return _query_anthropic_models(timeout_seconds=timeout_seconds, env=source_env)
     if normalized == "glm":
@@ -100,6 +104,31 @@ def _query_openai_models(*, timeout_seconds: float, env: Mapping[str, str]) -> M
     base_url = env.get("OPENAI_BASE_URL") or env.get("OPENAI_API_BASE") or "https://api.openai.com/v1"
     url = _join_api_path(base_url, "models")
     return _query_bearer_models(url, api_key=api_key, source="OpenAI /v1/models", timeout_seconds=timeout_seconds)
+
+
+def _query_codex_models_cache(*, env: Mapping[str, str], use_user_home: bool) -> ModelCatalog:
+    path = _codex_models_cache_path(env, use_user_home=use_user_home)
+    if path is None:
+        return ModelCatalog((), "Codex models cache", "Codex models cache path is unavailable")
+    if not path.is_file():
+        return ModelCatalog((), "Codex models cache", f"Codex models cache not found at {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return ModelCatalog((), "Codex models cache", f"Codex models cache is unreadable: {exc}")
+    models = _parse_models_payload(payload)
+    if not models:
+        return ModelCatalog((), "Codex models cache", "Codex models cache returned no parseable models")
+    return ModelCatalog(models, "Codex models cache")
+
+
+def _codex_models_cache_path(env: Mapping[str, str], *, use_user_home: bool) -> Path | None:
+    codex_home = env.get("CODEX_HOME")
+    if codex_home:
+        return Path(codex_home).expanduser() / "models_cache.json"
+    if use_user_home:
+        return Path.home() / ".codex" / "models_cache.json"
+    return None
 
 
 def _query_anthropic_models(*, timeout_seconds: float, env: Mapping[str, str]) -> ModelCatalog:
@@ -187,6 +216,9 @@ def _model_name_from_mapping(item: Mapping[str, Any]) -> list[str]:
         value = item.get(key)
         if isinstance(value, str) and value.strip():
             names.append(value)
+    slug = item.get("slug")
+    if isinstance(slug, str) and slug.strip():
+        names.insert(0, slug)
     return names
 
 
