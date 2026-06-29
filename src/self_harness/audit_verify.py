@@ -17,6 +17,7 @@ AUDIT_VERIFICATION_BOUNDARY = (
     "does not execute tasks, invoke models, contact Harbor, Docker, registries, scanners, "
     "PyPI, Sigstore, or cloud providers, and is not benchmark reproduction evidence"
 )
+_SCHEMA_ORDER = ("1.0", "1.1", "1.2", "1.3", "1.4")
 
 
 @dataclass(frozen=True)
@@ -250,6 +251,15 @@ def _check_migration_provenance(
     )
 
 
+def _schema_at_least(row_schema: str, audit_schema_version: str) -> bool:
+    if row_schema not in SUPPORTED_SCHEMA_VERSIONS or audit_schema_version not in SUPPORTED_SCHEMA_VERSIONS:
+        return False
+    try:
+        return _SCHEMA_ORDER.index(row_schema) >= _SCHEMA_ORDER.index(audit_schema_version)
+    except ValueError:
+        return False
+
+
 def _check_lineage_schema(
     round_: AuditRound,
     lineage: dict[str, Any],
@@ -259,12 +269,16 @@ def _check_lineage_schema(
     root: Path,
 ) -> None:
     row_schema = lineage.get("schema_version")
-    passed = row_schema == audit_schema_version or (audit_schema_version == "1.0" and row_schema is None)
+    passed = (
+        row_schema == audit_schema_version
+        or (audit_schema_version == "1.0" and row_schema is None)
+        or _schema_at_least(str(row_schema), audit_schema_version)
+    )
     _add_check(
         checks,
         name=f"round_{round_.index}_lineage_schema",
         passed=passed,
-        detail="lineage row schema_version matches manifest",
+        detail="lineage row schema_version is compatible with manifest",
         path=root / "lineage.json",
         metadata={"lineage_schema_version": str(row_schema)} if row_schema is not None else None,
     )

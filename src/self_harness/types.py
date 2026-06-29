@@ -111,6 +111,47 @@ class HarnessPatch:
 
 
 @dataclass(frozen=True)
+class ProfileRef:
+    provider: str
+    model: str
+
+
+@dataclass(frozen=True)
+class ProducerProfile:
+    provider: str
+    model: str
+    effort: str | None = None
+    binary: str | None = None
+    discovered_at: str | None = None
+
+
+@dataclass(frozen=True)
+class SmokeCertification:
+    profiles: list[ProfileRef]
+    corpus_ref: str
+    tolerance: int = 0
+    passed: bool = True
+    reason: str = "not-run"
+
+
+@dataclass(frozen=True)
+class HarnessOverlay:
+    ops: list[HarnessOp] = field(default_factory=list)
+    certified_at: str | None = None
+    certified_by_smoke: SmokeCertification | None = None
+
+
+@dataclass(frozen=True)
+class HarnessLayers:
+    base: HarnessSpec
+    provider_overlays: dict[str, HarnessOverlay] = field(default_factory=dict)
+    model_overlays: dict[str, HarnessOverlay] = field(default_factory=dict)
+    certified_profiles: list[ProfileRef] = field(default_factory=list)
+    smoke_corpus_ref: str = "examples/agentic_corpus.json#held_out"
+    lineage_tail: list[LineageRecord] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
 class Proposal:
     id: str
     round_index: int
@@ -121,6 +162,7 @@ class Proposal:
     expected_effect: str
     regression_risks: list[str]
     invalid_reason: str | None = None
+    target_profile: ProfileRef | None = None
 
     @property
     def primary_op(self) -> HarnessOp:
@@ -161,6 +203,8 @@ class ProposerContext:
     harness: HarnessSpec
     round_index: int
     budget: ProposalBudget
+    layers: HarnessLayers | None = None
+    target_profile: ProfileRef | None = None
 
 
 @dataclass(frozen=True)
@@ -206,7 +250,10 @@ class LineageRecord:
     ops_applied: list[HarnessOp]
     reverse_ops: list[HarnessOp]
     accepted_proposal_ids: list[str]
-    schema_version: str = "1.2"
+    target_profile: ProfileRef | None = None
+    producer_profile: ProducerProfile | None = None
+    certification: SmokeCertification | None = None
+    schema_version: str = "1.3"
 
 
 def to_jsonable(value: Any) -> Any:

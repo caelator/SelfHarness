@@ -19,7 +19,7 @@ from self_harness.adapters.agentic.runner import (
     GLMAgenticTaskAdapter,
 )
 from self_harness.adapters.agentic.tools import execute_tool, tool_schemas
-from self_harness.adapters.llm.messages import AnthropicAgentTransport, MessagesTurn
+from self_harness.adapters.llm.messages import AnthropicAgentTransport, MessagesTurn, RateLimitPacer, RateLimitPolicy
 from self_harness.adapters.terminal_bench.agent_render import render_system_prompt
 from self_harness.exceptions import CodexVerifierError, TaskLoadError
 from self_harness.harness import apply_patch, initial_harness
@@ -247,6 +247,101 @@ def test_agent_transport_minimal_effort_uses_zai_reasoning_effort() -> None:
     assert captured["request"]["reasoning_effort"] == "minimal"
     assert captured["request"]["thinking"] == {"type": "enabled"}
     assert "output_config" not in captured["request"]
+
+
+@contextmanager
+def _rate_limit_then_success_server(captured: dict[str, Any]):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API.
+            length = int(self.headers.get("Content-Length", "0"))
+            request = json.loads(self.rfile.read(length).decode("utf-8"))
+            captured.setdefault("requests", []).append(request)
+            request_count = len(captured["requests"])
+            if request_count == 1:
+                payload = b'{"error":"[1302][Rate limit reached for requests]"}'
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Retry-After", "0")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            payload = json.dumps(
+                {
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "ok after retry"}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    host, port = httpd.server_address
+    try:
+        yield f"http://{host}:{port}/api/anthropic"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=2)
+
+
+def test_agent_transport_retries_rate_limit_without_changing_model() -> None:
+    captured: dict[str, Any] = {}
+    retries: list[tuple[int, float, str]] = []
+    with _rate_limit_then_success_server(captured) as base_url:
+        transport = AnthropicAgentTransport(
+            base_url=base_url,
+            api_key="secret",
+            model="glm-5.2",
+            rate_limit_policy=RateLimitPolicy(
+                max_attempts=3,
+                base_backoff_seconds=0,
+                max_backoff_seconds=0,
+                min_interval_seconds=0,
+            ),
+            on_rate_limit_retry=lambda attempt, delay, reason: retries.append((attempt, delay, reason)),
+        )
+        turn = transport.create_message(system="s", messages=[{"role": "user", "content": "go"}], tools=[])
+
+    assert turn.text() == "ok after retry"
+    assert [request["model"] for request in captured["requests"]] == ["glm-5.2", "glm-5.2"]
+    assert retries == [(1, 0.0, "status 429")]
+
+
+def test_rate_limit_pacer_preserves_min_interval_between_successful_requests() -> None:
+    captured: dict[str, Any] = {}
+    now = 0.0
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    def sleeper(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    with _messages_server(captured) as base_url:
+        transport = AnthropicAgentTransport(
+            base_url=base_url,
+            api_key="secret",
+            model="glm-5.2",
+            rate_limit_policy=RateLimitPolicy(max_attempts=1, min_interval_seconds=2),
+            rate_limit_pacer=RateLimitPacer(clock=clock, sleeper=sleeper),
+        )
+        transport.create_message(system="s", messages=[{"role": "user", "content": "one"}], tools=[])
+        transport.create_message(system="s", messages=[{"role": "user", "content": "two"}], tools=[])
+
+    assert sleeps == [2.0]
 
 
 # --- render_system_prompt ----------------------------------------------------

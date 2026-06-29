@@ -147,8 +147,16 @@ def test_ui_persists_and_evolves_harness_across_runs(tmp_path: Path) -> None:
     status = app.state()["harness_state"]
     assert status["evolving"] is True
     assert status["source_run"] == first["run_id"]
+    assert status["schema_version"] == "2.0"
+    assert "deterministic" in status["profiles"]["providers"]
+    assert "deterministic/heuristic" in status["profiles"]["models"]
     evolved_hash = status["harness_hash"]
     assert evolved_hash
+    import json
+
+    persisted = json.loads((tmp_path / "runs" / "harness_state.json").read_text(encoding="utf-8"))
+    assert "harness" in persisted
+    assert "base" in persisted
 
     # Second run should start FROM the persisted harness, not initial_harness().
     second = app.start_run({"rounds": 1, "evaluation_repeats": 1, "seed": 0})

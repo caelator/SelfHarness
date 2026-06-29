@@ -407,6 +407,54 @@ def test_repl_identity_question_is_answered_locally(tmp_path: Path, monkeypatch,
     assert "glm ›" not in out
 
 
+def test_repl_delegate_runs_helper_without_switching_provider(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:  # type: ignore[no-untyped-def]
+    fake = tmp_path / "codex"
+    fake.write_text(
+        """#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    out="$1"
+  fi
+  shift || true
+done
+cat > helper-prompt.txt
+printf '%s' "helper says inspect src/foo.py" > "$out"
+printf '%s\\n' '{"type":"turn.completed","usage":{"total_tokens":3}}'
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("SELF_HARNESS_CODEX_BINARY", str(fake))
+    lines = iter(["/helpers on", "/delegate codex inspect the failure", "/whoami", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = InteractiveSession(
+        api_key="k",
+        base_url="https://api.z.ai/api/anthropic",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        model="glm-5.2",
+    )
+
+    assert run_repl(session, banner=False, root=None, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "helper delegation enabled" in out
+    assert "delegating one subtask to codex; active provider stays glm" in out
+    assert "codex helper › helper says inspect src/foo.py" in out
+    assert "provider: glm, model: glm-5.2" in out
+    assert "helper: codex" in session.history[-2]["content"]
+    assert "inspect the failure" in session.history[-2]["content"]
+    assert (tmp_path / "helper-prompt.txt").read_text(encoding="utf-8")
+
+
 class StubJudgeProvider:
     def __init__(self, provider_id: str, admitted: bool, criterion: str | None, reason: str) -> None:
         self.provider_id = provider_id
@@ -952,6 +1000,44 @@ def test_effort_command_rejects_effort_not_supported_by_current_model(
     assert selected is session
     assert session.effort is None
     assert renderer.errors == ["  ! effort for gpt-low-only must be one of: low"]
+
+
+def test_switching_model_recomputes_effective_harness_from_layers(tmp_path: Path) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.harness_state import effective_harness, profile_key
+    from self_harness.types import HarnessLayers, HarnessOp, HarnessOverlay, ProfileRef
+
+    profile_a = ProfileRef(provider="codex", model="gpt-a")
+    profile_b = ProfileRef(provider="codex", model="gpt-b")
+    layers = HarnessLayers(
+        base=initial_harness(),
+        model_overlays={
+            profile_key(profile_a): HarnessOverlay([HarnessOp("AppendToSurface", "bootstrap", "model-a-only")]),
+            profile_key(profile_b): HarnessOverlay([HarnessOp("AppendToSurface", "bootstrap", "model-b-only")]),
+        },
+    )
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=effective_harness(layers, profile_a),
+        harness_layers=layers,
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        model="gpt-a",
+    )
+
+    selected = repl._switch_code_backend(
+        session,
+        provider="codex",
+        model="gpt-b",
+        effort=None,
+        renderer=ScriptedRenderer([]),
+    )
+
+    assert selected is session
+    assert session.model == "gpt-b"
+    assert "model-b-only" in session.harness.bootstrap
+    assert "model-a-only" not in session.harness.bootstrap
 
 
 def test_code_startup_ignores_stale_codex_max_effort(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]

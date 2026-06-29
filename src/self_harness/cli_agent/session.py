@@ -17,14 +17,17 @@ from self_harness.adapters.agentic.tools import DEFAULT_TOOL_TIMEOUT_SECONDS, To
 from self_harness.adapters.llm.messages import (
     AnthropicAgentTransport,
     MessagesTransport,
+    RateLimitPacer,
+    RateLimitPolicy,
     StreamingAnthropicAgentTransport,
 )
 from self_harness.adapters.terminal_bench.agent_render import render_system_prompt
 from self_harness.cli_agent.effort import valid_effort_or_none
 from self_harness.cli_agent.harvest import FailureHarvester
 from self_harness.exceptions import InvalidPatchError
-from self_harness.harness import harness_hash, initial_harness, load_harness_spec
-from self_harness.types import HarnessSpec
+from self_harness.harness import harness_hash, initial_harness
+from self_harness.harness_state import effective_harness, load_harness_state, register_profile
+from self_harness.types import HarnessLayers, HarnessSpec, ProfileRef
 
 if TYPE_CHECKING:
     from self_harness.cli_agent.ux_harvest import UxFailureHarvester
@@ -57,15 +60,24 @@ def load_session_harness(harness_state: Path) -> tuple[HarnessSpec, bool]:
     (spec, evolving) where evolving indicates a persisted lineage was found.
     """
 
+    spec, evolving, _layers = load_session_harness_layers(harness_state)
+    return spec, evolving
+
+
+def load_session_harness_layers(
+    harness_state: Path,
+    profile: ProfileRef | None = None,
+) -> tuple[HarnessSpec, bool, HarnessLayers]:
+    """Load layered harness state and return the effective harness for ``profile``."""
+
     if harness_state.is_file():
         try:
-            value = json.loads(harness_state.read_text(encoding="utf-8"))
-            surfaces = value.get("harness") if isinstance(value, dict) else None
-            if isinstance(surfaces, dict):
-                return load_harness_spec(surfaces), True
+            layers = load_harness_state(harness_state)
+            return effective_harness(layers, profile), True, layers
         except (OSError, json.JSONDecodeError, InvalidPatchError):
             pass
-    return initial_harness(), False
+    layers = HarnessLayers(base=initial_harness())
+    return effective_harness(layers, profile), False, layers
 
 
 @dataclass
@@ -83,10 +95,14 @@ class InteractiveSession:
     harness: HarnessSpec
     harvester: FailureHarvester
     ux_harvester: UxFailureHarvester | None = None
+    harness_layers: HarnessLayers | None = None
     model: str = DEFAULT_GLM_MODEL
     effort: str | None = None
     max_steps: int = DEFAULT_MAX_STEPS
     tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
+    rate_limit_policy: RateLimitPolicy | None = None
+    rate_limit_pacer: RateLimitPacer = field(default_factory=RateLimitPacer)
+    helpers_enabled: bool = False
     evolving: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     turn_index: int = 0
@@ -95,7 +111,12 @@ class InteractiveSession:
     def _get_transport(self) -> MessagesTransport:
         if self._transport is None:
             self._transport = AnthropicAgentTransport(
-                base_url=self.base_url, api_key=self.api_key, model=self.model, effort=self.effort
+                base_url=self.base_url,
+                api_key=self.api_key,
+                model=self.model,
+                effort=self.effort,
+                rate_limit_policy=self.rate_limit_policy,
+                rate_limit_pacer=self.rate_limit_pacer,
             )
         return self._transport
 
@@ -103,6 +124,7 @@ class InteractiveSession:
         self,
         on_text_delta: Callable[[str], None] | None,
         on_tool_start: Callable[[str], None] | None,
+        on_rate_limit_retry: Callable[[int, float, str], None] | None,
     ) -> MessagesTransport:
         # Streaming transports carry per-turn callbacks, so build a fresh one each turn rather than cache.
         return StreamingAnthropicAgentTransport(
@@ -112,11 +134,21 @@ class InteractiveSession:
             effort=self.effort,
             on_text_delta=on_text_delta,
             on_tool_start=on_tool_start,
+            rate_limit_policy=self.rate_limit_policy,
+            rate_limit_pacer=self.rate_limit_pacer,
+            on_rate_limit_retry=on_rate_limit_retry,
         )
 
     @property
     def harness_hash(self) -> str:
         return harness_hash(self.harness)
+
+    def set_runtime_profile(self, provider: str, model: str | None) -> None:
+        if self.harness_layers is None:
+            return
+        layers, profile, _created = register_profile(self.harness_layers, provider, model)
+        self.harness_layers = layers
+        self.harness = effective_harness(layers, profile)
 
     def reset(self) -> None:
         self.history.clear()
@@ -131,6 +163,7 @@ class InteractiveSession:
         on_tool_event: Callable[[str, str, bool], None] | None = None,
         on_tool_starting: Callable[[str, str], None] | None = None,
         on_model_request: Callable[[int], None] | None = None,
+        on_rate_limit_retry: Callable[[int, float, str], None] | None = None,
     ) -> TurnResult:
         """Run one user turn through the agentic loop, persisting conversation state and harvesting.
 
@@ -169,7 +202,11 @@ class InteractiveSession:
                 on_tool_starting(name, _summarize(name, tool_input))
 
         if on_text_delta is not None:
-            transport: MessagesTransport = self._streaming_transport(on_text_delta, on_tool_start)
+            transport: MessagesTransport = self._streaming_transport(
+                on_text_delta,
+                on_tool_start,
+                on_rate_limit_retry,
+            )
         else:
             transport = self._get_transport()
 
@@ -218,10 +255,13 @@ class HeadlessCliSession:
     harness: HarnessSpec
     harvester: FailureHarvester
     ux_harvester: UxFailureHarvester | None = None
+    harness_layers: HarnessLayers | None = None
     model: str | None = None
     effort: str | None = None
     max_steps: int = DEFAULT_MAX_STEPS
     tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
+    rate_limit_policy: RateLimitPolicy | None = None
+    helpers_enabled: bool = False
     evolving: bool = False
     history: list[dict[str, Any]] = field(default_factory=list)
     turn_index: int = 0
@@ -229,6 +269,13 @@ class HeadlessCliSession:
     @property
     def harness_hash(self) -> str:
         return harness_hash(self.harness)
+
+    def set_runtime_profile(self, provider: str, model: str | None) -> None:
+        if self.harness_layers is None:
+            return
+        layers, profile, _created = register_profile(self.harness_layers, provider, model)
+        self.harness_layers = layers
+        self.harness = effective_harness(layers, profile)
 
     def reset(self) -> None:
         self.history.clear()
@@ -243,8 +290,10 @@ class HeadlessCliSession:
         on_tool_event: Callable[[str, str, bool], None] | None = None,
         on_tool_starting: Callable[[str, str], None] | None = None,
         on_model_request: Callable[[int], None] | None = None,
+        on_rate_limit_retry: Callable[[int, float, str], None] | None = None,
     ) -> TurnResult:
         del on_tool_start  # Headless CLIs do not expose SelfHarness's native text/tool callbacks here.
+        del on_rate_limit_retry
         self.turn_index += 1
         if on_model_request is not None:
             on_model_request(0)

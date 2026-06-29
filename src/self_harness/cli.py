@@ -1915,6 +1915,7 @@ def _run_code(
     from datetime import UTC, datetime
 
     from self_harness import user_config
+    from self_harness.adapters.llm.messages import RateLimitPolicy
     from self_harness.agentic_session import (
         HOST_EXEC_WARNING_LINES,
         resolve_zai_api_key,
@@ -1922,10 +1923,11 @@ def _run_code(
     )
     from self_harness.cli_agent import FailureHarvester, HeadlessCliSession, InteractiveSession, run_repl
     from self_harness.cli_agent.effort import normalize_effort, validate_effort_for_provider
-    from self_harness.cli_agent.session import load_session_harness
+    from self_harness.cli_agent.session import load_session_harness_layers
     from self_harness.cli_agent.sessions import latest_session, load_session
     from self_harness.cli_agent.ux_harvest import SecondaryModelJudge, UxFailureHarvester
     from self_harness.exceptions import AgenticRunnerError
+    from self_harness.harness_state import register_profile, write_harness_state
     from self_harness.loop_paths import central_runs_dir
 
     workdir = root.resolve()
@@ -2000,7 +2002,13 @@ def _run_code(
     now = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     session_id = resumed.id if resumed is not None else f"code-{now}-{uuid.uuid4().hex[:8]}"
 
-    harness, evolving = load_session_harness(state_path)
+    runtime_profile = user_config.resolve_runtime_profile(provider=provider, model=model, config=cfg)
+    harness, evolving, harness_layers = load_session_harness_layers(state_path, profile=runtime_profile)
+    harness_layers, runtime_profile, profile_created = register_profile(harness_layers, provider, model)
+    if profile_created:
+        write_harness_state(state_path, harness_layers, active_profile=runtime_profile)
+        evolving = True
+        harness = load_session_harness_layers(state_path, profile=runtime_profile)[0]
     harvester = FailureHarvester(inbox_dir=inbox, workdir=workdir, enabled=harvest)
     ux_harvester = UxFailureHarvester(
         inbox_dir=inbox,
@@ -2008,6 +2016,8 @@ def _run_code(
         judge=SecondaryModelJudge(),
         enabled=harvest,
     )
+    rate_limit_policy = _glm_rate_limit_policy_from_config(cfg, RateLimitPolicy)
+    helpers_enabled = bool(cfg.get("code_helpers_enabled", False))
     session: HeadlessCliSession | InteractiveSession
     if headless_backend is not None:
         session = HeadlessCliSession(
@@ -2015,12 +2025,15 @@ def _run_code(
             binary=_headless_binary_for_backend(headless_backend),
             workdir=workdir,
             harness=harness,
+            harness_layers=harness_layers,
             harvester=harvester,
             ux_harvester=ux_harvester,
             model=model,
             effort=effort,
             max_steps=max_steps,
             tool_timeout_seconds=tool_timeout_seconds,
+            rate_limit_policy=rate_limit_policy,
+            helpers_enabled=helpers_enabled,
             evolving=evolving,
             history=list(resumed.history) if resumed is not None else [],
             turn_index=len(resumed.turns) if resumed is not None else 0,
@@ -2031,12 +2044,15 @@ def _run_code(
             base_url=base_url,
             workdir=workdir,
             harness=harness,
+            harness_layers=harness_layers,
             harvester=harvester,
             ux_harvester=ux_harvester,
             model=model or user_config.DEFAULT_MODEL,
             effort=effort,
             max_steps=max_steps,
             tool_timeout_seconds=tool_timeout_seconds,
+            rate_limit_policy=rate_limit_policy,
+            helpers_enabled=helpers_enabled,
             evolving=evolving,
             history=list(resumed.history) if resumed is not None else [],
             turn_index=len(resumed.turns) if resumed is not None else 0,
@@ -2051,6 +2067,15 @@ def _run_code(
         session_id=session_id,
         timestamp=now,
         plain=plain,
+    )
+
+
+def _glm_rate_limit_policy_from_config(cfg: Any, policy_cls: type[Any]) -> Any:
+    return policy_cls(
+        max_attempts=max(1, int(cfg.get("glm_retry_max_attempts", 4) or 4)),
+        base_backoff_seconds=max(0.0, float(cfg.get("glm_retry_base_backoff_seconds", 5.0) or 5.0)),
+        max_backoff_seconds=max(0.0, float(cfg.get("glm_retry_max_backoff_seconds", 60.0) or 60.0)),
+        min_interval_seconds=max(0.0, float(cfg.get("glm_request_min_interval_seconds", 1.5) or 1.5)),
     )
 
 

@@ -654,11 +654,13 @@ self-harness glm-agentic-demo examples/agentic_corpus.json \
 ## Coding Agent CLI (`self-harness code`)
 
 `self-harness code` is an interactive coding-agent TUI for your terminal. It can
-run GLM 5.2 through Z.ai or delegate the main coding turn to headless local CLIs
-(`codex`, `agy`, or `claude`) while still driving every turn with the active
-**self-improving harness**. It opens a multi-turn session in the current
-directory, persists conversation threads, and gives you an out-of-band control
-plane so model/provider/config changes are never sent to the model as chat.
+run GLM 5.2 through Z.ai or an explicitly selected headless local CLI (`codex`,
+`agy`, or `claude`) while still driving every turn with the active
+**self-improving harness**. If GLM is the main provider, optional helper
+delegation can send one bounded subtask to a helper CLI without switching the
+active provider. It opens a multi-turn session in the current directory,
+persists conversation threads, and gives you an out-of-band control plane so
+model/provider/config changes are never sent to the model as chat.
 The reply streams into a rich terminal UI with markdown, per-tool-call status,
 and a thinking spinner; pipe the output or pass `--plain` for plain text.
 
@@ -689,6 +691,8 @@ palette reaches the same controls as the slash commands:
 /feedback [text]              alias for /report
 /harvested                    list command bundles and admitted UX reports
 /rejected                     list rejected UX captures with admission reasons
+/helpers                      list/toggle opt-in helper CLI delegation
+/delegate codex <subtask>     pass one explicit subtask to a helper CLI
 /save                         persist current thread immediately
 /clear                        clear the screen
 /reset                        clear current thread history
@@ -725,11 +729,21 @@ Provider defaults can also be set before launch:
 self-harness settings set code_provider codex
 self-harness settings set code_model gpt-5.6
 self-harness settings set code_effort xhigh
+self-harness settings set glm_retry_max_attempts 4
+self-harness settings set glm_request_min_interval_seconds 1.5
 ```
 
 The older `settings set model codex|agy|claude|glm-5.2` compatibility path is
 still accepted, but new installs should prefer `code_provider`, `code_model`,
 and `code_effort`.
+
+GLM/Z.ai rate limits are handled in-place: the CLI paces requests, retries
+explicit rate-limit or overload responses with bounded exponential backoff, and
+never silently falls back to another provider. If Z.ai still returns `[1302]`
+after the retry budget, the main model remains GLM; wait and send `continue`, or
+opt into helper delegation with `/helpers on` and `/delegate <codex|agy|claude>
+<subtask>`. Helper output is appended to the current GLM conversation as
+context; it does not change `/whoami`, `/status`, or the active provider.
 
 What makes it different from a static-harness CLI: it closes a **self-improvement
 flywheel**. Failing check/build/test commands are harvested into the shared inbox

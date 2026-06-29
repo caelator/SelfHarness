@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
 from self_harness import user_config
 from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
+from self_harness.adapters.llm.messages import RateLimitPacer, RateLimitPolicy
 from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
 from self_harness.cli_agent.context import expand_mentions
 from self_harness.cli_agent.effort import (
@@ -27,6 +29,7 @@ from self_harness.cli_agent.effort import (
     valid_effort_or_none,
     validate_effort_for_provider,
 )
+from self_harness.cli_agent.harvest import FailureHarvester
 from self_harness.cli_agent.model_discovery import (
     EffortCatalog,
     ModelCatalog,
@@ -38,6 +41,7 @@ from self_harness.cli_agent.sessions import SessionRecord, list_sessions, load_s
 from self_harness.cli_agent.ui import BackRequested, ConsoleRenderer
 from self_harness.cli_agent.ux_harvest import UxFailureHarvester
 from self_harness.exceptions import AgenticRunnerError
+from self_harness.harness_state import effective_harness, register_profile
 
 CodeSession = InteractiveSession | HeadlessCliSession
 _KNOWN_EFFORTS_TEXT = "none, minimal, low, medium, high, xhigh, max"
@@ -56,6 +60,7 @@ _PROVIDER_ALIASES = {
     "zai": "glm",
     "z.ai": "glm",
 }
+_HELPER_BACKENDS = frozenset({"codex", "agy", "claude"})
 _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/menu", "open the command palette"),
     ("/commands", "open the command palette"),
@@ -78,6 +83,8 @@ _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/report", "report a semantic/control-plane UX issue"),
     ("/feedback", "alias for /report"),
     ("/rejected", "list rejected semantic UX captures"),
+    ("/helpers", "manage opt-in helper CLI delegation"),
+    ("/delegate", "send one subtask to an enabled helper CLI"),
     ("/cwd", "show working directory"),
     ("/clear", "clear the terminal"),
     ("/reset", "clear current thread history"),
@@ -105,6 +112,8 @@ Commands:
   /report      report a semantic/control-plane UX issue for secondary judging
   /feedback    alias for /report
   /rejected    list rejected semantic UX captures
+  /helpers     list/toggle optional helper CLIs: /helpers on|off
+  /delegate    pass one subtask to a helper: /delegate codex inspect the failure
   /sessions    list saved sessions you can resume (alias for /threads list)
   /clear       clear the terminal
   /reset       clear the current thread history
@@ -236,6 +245,19 @@ def run_repl(
         if line == "/harvested --rejected" or line == "/rejected":
             _show_rejected(session, renderer)
             continue
+        if line == "/helpers" or line.startswith("/helpers "):
+            _handle_helpers_command(session, line.removeprefix("/helpers").strip(), renderer)
+            continue
+        if line == "/delegate" or line.startswith("/delegate "):
+            _handle_delegate_command(
+                session,
+                record,
+                line.removeprefix("/delegate").strip(),
+                renderer,
+                root,
+            )
+            record.history[:] = list(session.history)
+            continue
         if line == "/report" or line.startswith("/report ") or line == "/feedback" or line.startswith("/feedback "):
             command = line.split(maxsplit=1)[1] if " " in line else ""
             _handle_report_command(session, record, command, renderer, root)
@@ -290,6 +312,12 @@ def _run_turn(
     def _on_model_request(step: int) -> None:
         renderer.set_phase("thinking")
 
+    def _on_rate_limit_retry(attempt: int, delay: float, reason: str) -> None:
+        renderer.info(
+            f"  Z.ai rate limit/overload ({reason}); keeping GLM active and retrying "
+            f"in {delay:.1f}s (attempt {attempt + 1})."
+        )
+
     # Send the user's message; if the agent runs out of step budget mid-task, auto-continue a bounded
     # number of times instead of stopping silently (the old behavior that left big tasks half-done).
     message = augmented
@@ -303,6 +331,7 @@ def _run_turn(
                 on_tool_event=_on_tool_event,
                 on_tool_starting=_on_tool_starting,
                 on_model_request=_on_model_request,
+                on_rate_limit_retry=_on_rate_limit_retry,
             )
         except KeyboardInterrupt:
             renderer.end_stream(stop_reason="interrupted")
@@ -318,9 +347,9 @@ def _run_turn(
             renderer.error(f"  ! {result.error}")
             if _is_rate_limit_error(result.error):
                 renderer.info(
-                    "  Z.ai rate limit detected. Use `self-harness settings set model codex`, "
-                    "`self-harness settings set model agy`, or `self-harness settings set model claude` "
-                    "to run the main coding agent through a local headless CLI."
+                    "  Z.ai is still rate-limiting GLM after retries. GLM remains the active model; "
+                    "wait and send `continue`, reduce request pressure, or opt into `/helpers on` and "
+                    "`/delegate <codex|agy|claude> <subtask>` for a specific helper subtask."
                 )
         ux_written, ux_rejected = _observe_ux_turn(
             session,
@@ -403,6 +432,168 @@ def _handle_report_command(
         renderer.info(f"semantic issue candidate rejected: {', '.join(rejected)}")
     if not written and not rejected:
         renderer.info("no semantic issue candidate was written")
+
+
+def _handle_helpers_command(session: CodeSession, raw: str, renderer: ConsoleRenderer) -> None:
+    action = raw.strip().lower()
+    cfg = user_config.load_config()
+    if action in {"on", "enable", "enabled", "true", "1"}:
+        session.helpers_enabled = True
+        cfg.set("code_helpers_enabled", True)
+        cfg.save()
+        renderer.info("helper delegation enabled. Use /delegate <codex|agy|claude> <subtask>.")
+        return
+    if action in {"off", "disable", "disabled", "false", "0"}:
+        session.helpers_enabled = False
+        cfg.set("code_helpers_enabled", False)
+        cfg.save()
+        renderer.info("helper delegation disabled. GLM/main provider remains unchanged.")
+        return
+    if action:
+        renderer.error("  ! usage: /helpers, /helpers on, /helpers off")
+        return
+    rows = _helper_rows()
+    status = "enabled" if getattr(session, "helpers_enabled", False) else "disabled"
+    lines = [f"helper delegation: {status}"]
+    lines.extend(f"  {backend}: {state} ({binary})" for backend, binary, state in rows)
+    lines.append("helpers never replace the active provider; use /delegate for one explicit subtask.")
+    renderer.info("\n".join(lines))
+
+
+def _handle_delegate_command(
+    session: CodeSession,
+    record: SessionRecord,
+    raw: str,
+    renderer: ConsoleRenderer,
+    root: Path | None,
+) -> None:
+    if not getattr(session, "helpers_enabled", False):
+        renderer.info("helper delegation is off. Run /helpers on to enable explicit helper subtasks.")
+        return
+    try:
+        backend, prompt = _parse_delegate_request(raw, renderer)
+    except BackRequested:
+        renderer.info("delegate cancelled")
+        return
+    except ValueError as exc:
+        renderer.error(f"  ! {exc}")
+        return
+    binary = _helper_binary(backend)
+    if not _helper_available(binary):
+        renderer.error(
+            f"  ! {backend} helper binary not found: {binary}. "
+            f"Set SELF_HARNESS_{backend.upper()}_BINARY or install the CLI."
+        )
+        return
+    helper = HeadlessCliSession(
+        backend=backend,
+        binary=binary,
+        workdir=session.workdir,
+        harness=session.harness,
+        harvester=FailureHarvester(
+            inbox_dir=session.harvester.inbox_dir,
+            workdir=session.workdir,
+            enabled=False,
+        ),
+        ux_harvester=None,
+        harness_layers=getattr(session, "harness_layers", None),
+        model=None,
+        effort=valid_effort_or_none(backend, getattr(session, "effort", None)),
+        max_steps=session.max_steps,
+        tool_timeout_seconds=session.tool_timeout_seconds,
+        rate_limit_policy=getattr(session, "rate_limit_policy", None),
+        helpers_enabled=False,
+        evolving=session.evolving,
+        history=list(session.history[-12:]),
+        turn_index=session.turn_index,
+    )
+    renderer.info(f"delegating one subtask to {backend}; active provider stays {_provider(session)}")
+    result = helper.send(prompt)
+    _append_helper_note(session, backend=backend, prompt=prompt, result=result)
+    _record_turn(record, f"/delegate {backend} {prompt}", result)
+    record.history[:] = list(session.history)
+    _save(record, root)
+    if result.error:
+        renderer.error(f"  ! {backend} helper failed: {result.error}")
+    if result.final_text.strip():
+        renderer.info(f"{backend} helper › {result.final_text.strip()}")
+    else:
+        renderer.info(f"{backend} helper finished with no final text")
+
+
+def _parse_delegate_request(raw: str, renderer: ConsoleRenderer) -> tuple[str, str]:
+    if raw.strip():
+        try:
+            parts = shlex.split(raw)
+        except ValueError as exc:
+            raise ValueError(f"could not parse delegate command: {exc}") from exc
+        if len(parts) < 2:
+            raise ValueError("usage: /delegate <codex|agy|claude> <subtask>")
+        backend = _normalize_provider(parts[0])
+        if backend not in _HELPER_BACKENDS:
+            raise ValueError("helper must be one of: codex, agy, claude")
+        prompt = " ".join(parts[1:]).strip()
+        if not prompt:
+            raise ValueError("delegate subtask must be non-empty")
+        return backend, prompt
+    renderer.menu(
+        "Helper Delegation",
+        [("1", "codex helper"), ("2", "agy helper"), ("3", "claude helper"), ("0", "Cancel")],
+        footer="Pick a helper for one explicit subtask. The active provider is not changed.",
+    )
+    choice = renderer.ask("helper").strip().lower()
+    if not choice or choice == "0":
+        raise BackRequested()
+    choice = {"1": "codex", "2": "agy", "3": "claude"}.get(choice, choice)
+    backend = _normalize_provider(choice)
+    if backend not in _HELPER_BACKENDS:
+        raise ValueError("helper must be one of: codex, agy, claude")
+    prompt = renderer.ask("subtask").strip()
+    if not prompt:
+        raise ValueError("delegate subtask must be non-empty")
+    return backend, prompt
+
+
+def _append_helper_note(session: CodeSession, *, backend: str, prompt: str, result: object) -> None:
+    final_text = str(getattr(result, "final_text", "")).strip()
+    error = getattr(result, "error", None)
+    status = "failed" if error else "completed"
+    if final_text:
+        result_text = final_text
+    elif error:
+        result_text = f"error: {error}"
+    else:
+        result_text = "(no final text)"
+    if len(result_text) > 12000:
+        result_text = result_text[:12000] + "\n[truncated]"
+    note = (
+        "[SelfHarness helper delegation]\n"
+        f"helper: {backend}\n"
+        f"status: {status}\n"
+        f"subtask: {prompt}\n\n"
+        f"result:\n{result_text}"
+    )
+    session.history.append({"role": "user", "content": note})
+    session.history.append({"role": "assistant", "content": "Helper result recorded for future GLM turns."})
+
+
+def _helper_rows() -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    for backend in ("codex", "agy", "claude"):
+        binary = _helper_binary(backend)
+        state = "available" if _helper_available(binary) else "not found"
+        rows.append((backend, binary, state))
+    return rows
+
+
+def _helper_binary(backend: str) -> str:
+    return headless_binary_for_backend(backend)
+
+
+def _helper_available(binary: str) -> bool:
+    if shutil.which(binary):
+        return True
+    return Path(binary).expanduser().is_file()
 
 
 def _observe_ux_turn(
@@ -535,10 +726,12 @@ def _command_palette(
             ("8", "Harvested failures"),
             ("9", "Report UX issue"),
             ("10", "Rejected UX captures"),
-            ("11", "Save current thread"),
-            ("12", "Clear screen"),
-            ("13", "Reset current thread"),
-            ("14", "Help"),
+            ("11", "Helper CLIs"),
+            ("12", "Delegate to helper"),
+            ("13", "Save current thread"),
+            ("14", "Clear screen"),
+            ("15", "Reset current thread"),
+            ("16", "Help"),
             ("0", "Exit SelfHarness Code"),
         ],
         footer="Type a number, or press Enter to cancel.",
@@ -570,20 +763,24 @@ def _command_palette(
         _handle_report_command(session, record, "", renderer, root)
     elif choice in {"10", "rejected"}:
         _show_rejected(session, renderer)
-    elif choice in {"11", "save"}:
+    elif choice in {"11", "helpers"}:
+        _handle_helpers_command(session, "", renderer)
+    elif choice in {"12", "delegate"}:
+        _handle_delegate_command(session, record, "", renderer, root)
+    elif choice in {"13", "save"}:
         record.history[:] = list(session.history)
         _save(record, root)
         renderer.info(f"saved thread {record.id}")
-    elif choice in {"12", "clear"}:
+    elif choice in {"14", "clear"}:
         renderer.clear()
-    elif choice in {"13", "reset"}:
+    elif choice in {"15", "reset"}:
         if _confirm(renderer, "Clear current thread history?"):
             session.reset()
             record.history.clear()
             record.turns.clear()
             _save(record, root)
             renderer.info("(history cleared)")
-    elif choice in {"14", "help", "?"}:
+    elif choice in {"16", "help", "?"}:
         renderer.info(_HELP)
     elif choice in {"0", "exit", "quit", "q"}:
         return session, record, True
@@ -907,6 +1104,15 @@ def _switch_code_backend(
     except ValueError as exc:
         renderer.error(f"  ! {exc}")
         return session
+    harness = session.harness
+    harness_layers = getattr(session, "harness_layers", None)
+    if harness_layers is not None:
+        harness_layers, profile, _created = register_profile(
+            harness_layers,
+            provider,
+            model or _default_model_for_provider(provider),
+        )
+        harness = effective_harness(harness_layers, profile)
     if provider == "glm":
         try:
             api_key = resolve_zai_api_key()
@@ -917,36 +1123,47 @@ def _switch_code_backend(
             api_key=api_key,
             base_url=resolve_zai_base_url(),
             workdir=session.workdir,
-            harness=session.harness,
+            harness=harness,
             harvester=session.harvester,
             ux_harvester=_ux_harvester(session),
+            harness_layers=harness_layers,
             model=model or DEFAULT_GLM_MODEL,
             effort=effort,
             max_steps=session.max_steps,
             tool_timeout_seconds=session.tool_timeout_seconds,
+            rate_limit_policy=getattr(session, "rate_limit_policy", None),
+            rate_limit_pacer=(
+                session.rate_limit_pacer if isinstance(session, InteractiveSession) else RateLimitPacer()
+            ),
+            helpers_enabled=getattr(session, "helpers_enabled", False),
             evolving=session.evolving,
             history=list(session.history),
             turn_index=session.turn_index,
         )
 
     if isinstance(session, HeadlessCliSession) and session.backend == provider:
-        if model is not None:
-            session.model = model
+        session.model = model
         if effort is not None:
             session.effort = effort
+        if harness_layers is not None:
+            session.harness_layers = harness_layers
+            session.harness = harness
         return session
 
     return HeadlessCliSession(
         backend=provider,
         binary=headless_binary_for_backend(provider),
         workdir=session.workdir,
-        harness=session.harness,
+        harness=harness,
         harvester=session.harvester,
         ux_harvester=_ux_harvester(session),
+        harness_layers=harness_layers,
         model=model,
         effort=effort,
         max_steps=session.max_steps,
         tool_timeout_seconds=session.tool_timeout_seconds,
+        rate_limit_policy=getattr(session, "rate_limit_policy", None),
+        helpers_enabled=getattr(session, "helpers_enabled", False),
         evolving=session.evolving,
         history=list(session.history),
         turn_index=session.turn_index,
@@ -1245,7 +1462,9 @@ def _config_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSess
                 ("2", f"Tool timeout seconds: {session.tool_timeout_seconds}"),
                 ("3", f"Harvest failures: {'on' if session.harvester.enabled else 'off'}"),
                 ("4", "Model/provider/effort"),
-                ("5", f"Config path: {cfg.path}"),
+                ("5", f"Helper delegation: {'on' if getattr(session, 'helpers_enabled', False) else 'off'}"),
+                ("6", f"GLM retry/pacing: {_rate_limit_policy_summary(session)}"),
+                ("7", f"Config path: {cfg.path}"),
                 ("0", "Cancel"),
             ],
             footer="Changes apply immediately to this session and are saved as defaults.",
@@ -1292,6 +1511,14 @@ def _config_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSess
             if _model_status(session) == before_model_status:
                 continue
         elif choice == "5":
+            session.helpers_enabled = not getattr(session, "helpers_enabled", False)
+            cfg.set("code_helpers_enabled", session.helpers_enabled)
+            renderer.info(f"helper delegation {'on' if session.helpers_enabled else 'off'}")
+        elif choice == "6":
+            session = _rate_limit_config_palette(session, renderer)
+            cfg = user_config.load_config()
+            continue
+        elif choice == "7":
             renderer.info(str(cfg.path))
             continue
         else:
@@ -1321,7 +1548,103 @@ def _status_text(session: CodeSession, record: SessionRecord | None, root: Path 
         f"harness: {session.harness_hash[:16]} ({lineage})\n"
         f"harvest: {'on' if session.harvester.enabled else 'off'} -> {session.harvester.inbox_dir}\n"
         f"semantic harvest: {ux_text}\n"
+        f"helper delegation: {'on' if getattr(session, 'helpers_enabled', False) else 'off'}\n"
+        f"GLM retry/pacing: {_rate_limit_policy_summary(session)}\n"
         f"max steps: {session.max_steps}, tool timeout: {session.tool_timeout_seconds}s"
+    )
+
+
+def _rate_limit_config_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSession:
+    cfg = user_config.load_config()
+    policy = _current_rate_limit_policy(session)
+    while True:
+        renderer.menu(
+            "GLM Rate Limit Policy",
+            [
+                ("1", f"Retry attempts: {policy.max_attempts}"),
+                ("2", f"Base backoff seconds: {policy.base_backoff_seconds:g}"),
+                ("3", f"Max backoff seconds: {policy.max_backoff_seconds:g}"),
+                ("4", f"Minimum request interval seconds: {policy.min_interval_seconds:g}"),
+                ("0", "Done"),
+            ],
+            footer="Applies to GLM/Z.ai requests only; no provider fallback is performed.",
+        )
+        try:
+            choice = renderer.ask("rate").strip().lower()
+        except BackRequested:
+            return session
+        if choice in {"", "0"}:
+            return session
+        try:
+            if choice == "1":
+                raw = renderer.ask("retry attempts", default=str(policy.max_attempts)).strip()
+                policy = _rate_limit_policy_with(policy, max_attempts=max(1, int(raw)))
+                cfg.set("glm_retry_max_attempts", policy.max_attempts)
+            elif choice == "2":
+                raw = renderer.ask("base backoff seconds", default=str(policy.base_backoff_seconds)).strip()
+                policy = _rate_limit_policy_with(policy, base_backoff_seconds=max(0.0, float(raw)))
+                cfg.set("glm_retry_base_backoff_seconds", policy.base_backoff_seconds)
+            elif choice == "3":
+                raw = renderer.ask("max backoff seconds", default=str(policy.max_backoff_seconds)).strip()
+                policy = _rate_limit_policy_with(policy, max_backoff_seconds=max(0.0, float(raw)))
+                cfg.set("glm_retry_max_backoff_seconds", policy.max_backoff_seconds)
+            elif choice == "4":
+                raw = renderer.ask("minimum request interval seconds", default=str(policy.min_interval_seconds)).strip()
+                policy = _rate_limit_policy_with(policy, min_interval_seconds=max(0.0, float(raw)))
+                cfg.set("glm_request_min_interval_seconds", policy.min_interval_seconds)
+            else:
+                renderer.info(f"unknown rate-limit choice: {choice}")
+                continue
+        except ValueError:
+            renderer.error("  ! value must be numeric")
+            continue
+        session.rate_limit_policy = policy
+        cfg.save()
+        renderer.info(f"GLM retry/pacing: {_rate_limit_policy_summary(session)}")
+
+
+def _current_rate_limit_policy(session: CodeSession) -> RateLimitPolicy:
+    policy = getattr(session, "rate_limit_policy", None)
+    return policy if isinstance(policy, RateLimitPolicy) else RateLimitPolicy()
+
+
+def _rate_limit_policy_with(policy: RateLimitPolicy, **changes: object) -> RateLimitPolicy:
+    return RateLimitPolicy(
+        max_attempts=_numeric_int(changes.get("max_attempts", policy.max_attempts), policy.max_attempts),
+        base_backoff_seconds=_numeric_float(
+            changes.get("base_backoff_seconds", policy.base_backoff_seconds),
+            policy.base_backoff_seconds,
+        ),
+        max_backoff_seconds=_numeric_float(
+            changes.get("max_backoff_seconds", policy.max_backoff_seconds),
+            policy.max_backoff_seconds,
+        ),
+        min_interval_seconds=_numeric_float(
+            changes.get("min_interval_seconds", policy.min_interval_seconds),
+            policy.min_interval_seconds,
+        ),
+        retryable_statuses=policy.retryable_statuses,
+        retryable_markers=policy.retryable_markers,
+    )
+
+
+def _numeric_int(value: object, default: int) -> int:
+    if isinstance(value, (int, float, str, bytes, bytearray)):
+        return int(value)
+    return default
+
+
+def _numeric_float(value: object, default: float) -> float:
+    if isinstance(value, (int, float, str, bytes, bytearray)):
+        return float(value)
+    return default
+
+
+def _rate_limit_policy_summary(session: CodeSession) -> str:
+    policy = _current_rate_limit_policy(session)
+    return (
+        f"{policy.max_attempts} attempts, {policy.base_backoff_seconds:g}s base, "
+        f"{policy.max_backoff_seconds:g}s max, {policy.min_interval_seconds:g}s min interval"
     )
 
 

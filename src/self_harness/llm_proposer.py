@@ -10,6 +10,7 @@ from self_harness.proposer_policy import ProposalPolicy, select_actionable_patte
 from self_harness.types import (
     HarnessOp,
     HarnessPatch,
+    ProfileRef,
     Proposal,
     ProposerContext,
     Split,
@@ -108,7 +109,8 @@ def _system_prompt(context: ProposerContext) -> str:
         f"Editable surfaces: {', '.join(context.editable_surfaces)}. "
         "Schema: {\"proposals\":[{\"id_suffix\":str,\"pattern_id\":str,"
         "\"priority\":int,\"ops\":[{\"op\":str,\"surface\":str,\"payload\":any}],"
-        "\"rationale\":str,\"expected_effect\":str,\"regression_risks\":[str]}]}."
+        "\"rationale\":str,\"expected_effect\":str,\"regression_risks\":[str],"
+        "\"target_profile\":{\"provider\":str,\"model\":str}|null}]}."
     )
 
 
@@ -118,6 +120,7 @@ def _user_prompt(context: ProposerContext, actionable_patterns: list[Any]) -> st
         "budget": to_jsonable(context.budget),
         "editable_surfaces": context.editable_surfaces,
         "harness": to_jsonable(context.harness),
+        "target_profile": to_jsonable(context.target_profile),
         "held_in_failure_patterns": [_pattern_evidence(pattern) for pattern in actionable_patterns],
         "held_in_passing_summaries": to_jsonable(context.passing_summaries),
         "attempted_edits": to_jsonable(context.attempted_edits),
@@ -207,7 +210,21 @@ def _parse_one_proposal(
         expected_effect=expected_effect,
         regression_risks=list(risks),
         invalid_reason=None if pattern_id in context_pattern_ids else "ungrounded_proposal",
+        target_profile=_target_profile_from_item(item) or context.target_profile,
     )
+
+
+def _target_profile_from_item(item: dict[str, Any]) -> ProfileRef | None:
+    raw = item.get("target_profile")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    provider = raw.get("provider")
+    model = raw.get("model")
+    if not isinstance(provider, str) or not isinstance(model, str):
+        return None
+    return ProfileRef(provider=provider.strip().lower().replace("_", "-"), model=model.strip())
 
 
 def _enforce_grounding_and_diversity(proposals: list[Proposal], allowed_pattern_ids: set[str]) -> list[Proposal]:

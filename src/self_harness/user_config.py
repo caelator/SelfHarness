@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from self_harness.harness_state import make_profile_ref
+from self_harness.types import ProfileRef
+
 DEFAULT_BASE_URL = "https://api.z.ai/api/anthropic"
 DEFAULT_MODEL = "glm-5.2"
 _HEADLESS_CODE_PROVIDERS = {
@@ -48,6 +51,11 @@ _KNOWN_KEYS = (
     "code_provider",
     "code_model",
     "code_effort",
+    "code_helpers_enabled",
+    "glm_retry_max_attempts",
+    "glm_retry_base_backoff_seconds",
+    "glm_retry_max_backoff_seconds",
+    "glm_request_min_interval_seconds",
     "max_steps",
     "tool_timeout_seconds",
     "auto_promote",
@@ -55,8 +63,15 @@ _KNOWN_KEYS = (
     "share_central_harness",
     "loop_eval_repeats",
 )
-_INT_KEYS = frozenset({"max_steps", "tool_timeout_seconds", "loop_eval_repeats"})
-_BOOL_KEYS = frozenset({"auto_promote", "harvest", "share_central_harness"})
+_INT_KEYS = frozenset({"max_steps", "tool_timeout_seconds", "loop_eval_repeats", "glm_retry_max_attempts"})
+_FLOAT_KEYS = frozenset(
+    {
+        "glm_retry_base_backoff_seconds",
+        "glm_retry_max_backoff_seconds",
+        "glm_request_min_interval_seconds",
+    }
+)
+_BOOL_KEYS = frozenset({"auto_promote", "harvest", "share_central_harness", "code_helpers_enabled"})
 
 
 def config_dir() -> Path:
@@ -175,6 +190,8 @@ def _coerce(key: str, value: Any) -> Any:
         return None
     if key in _INT_KEYS and not isinstance(value, int):
         return int(str(value).strip())
+    if key in _FLOAT_KEYS and not isinstance(value, float):
+        return float(str(value).strip())
     if key in _BOOL_KEYS and not isinstance(value, bool):
         return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
     return str(value).strip() if isinstance(value, str) else value
@@ -277,6 +294,21 @@ def resolve_code_effort(
         return env
     cfg = config if config is not None else load_config()
     return cfg.code_effort
+
+
+def resolve_runtime_profile(
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    config: UserConfig | None = None,
+) -> ProfileRef:
+    resolved_provider = (
+        resolve_code_provider(provider, config=config)
+        if provider
+        else resolve_code_provider(config=config)
+    )
+    resolved_model = model if model is not None else resolve_code_model(provider=resolved_provider, config=config)
+    return make_profile_ref(resolved_provider, resolved_model)
 
 
 def _normalize_code_provider(value: str | None) -> str:

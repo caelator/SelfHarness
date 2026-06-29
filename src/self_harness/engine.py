@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
@@ -11,12 +13,18 @@ from self_harness.harness import (
     EDITABLE_SURFACES,
     OP_WHITELIST,
     SURFACE_KINDS,
-    apply_patch,
     harness_hash,
     initial_harness,
     merge_patches,
     patch_surface_key,
     structurally_mergeable,
+)
+from self_harness.harness_state import (
+    apply_patch_to_layers,
+    effective_harness,
+    make_profile_ref,
+    mark_profile_certified,
+    register_profile,
 )
 from self_harness.llm_proposer import LLMClient, LLMProposer
 from self_harness.mining import cluster_failures
@@ -27,14 +35,18 @@ from self_harness.types import (
     AcceptDecision,
     AttemptedEdit,
     EvaluationResult,
+    HarnessLayers,
     HarnessPatch,
     HarnessSpec,
     LineageRecord,
     PassingSummary,
+    ProducerProfile,
+    ProfileRef,
     Proposal,
     ProposalBudget,
     ProposerContext,
     RunRecord,
+    SmokeCertification,
     Split,
     Task,
     stable_json_dumps,
@@ -115,10 +127,17 @@ class SelfHarnessEngine:
         seed: int = 0,
         proposal_budget: ProposalBudget | None = None,
         initial_spec: HarnessSpec | None = None,
+        initial_layers: HarnessLayers | None = None,
         evaluation_repeats: int = 2,
         config: EngineConfig | None = None,
         aggregation: str = "sum",
         research_integrator: ResearchIntegrator | None = None,
+        target_profile: ProfileRef | None = None,
+        producer_profile: ProducerProfile | None = None,
+        runner_for: Callable[[ProfileRef], Runner] | None = None,
+        smoke_profiles: list[ProfileRef] | None = None,
+        smoke_tasks: list[Task] | None = None,
+        smoke_regression_tolerance: int | None = None,
     ) -> None:
         if config is None:
             config = EngineConfig(
@@ -138,7 +157,26 @@ class SelfHarnessEngine:
         # How repeats combine into scores: "sum" (paper-faithful, default) or "majority" (loop denoising
         # + early-stop). Kept off EngineConfig so the canonical config hash / fixtures are unchanged.
         self.aggregation = aggregation
-        self.harness = initial_spec or initial_harness()
+        self.layers = initial_layers or HarnessLayers(base=initial_spec or initial_harness())
+        self.target_profile = target_profile
+        if self.target_profile is not None:
+            self.layers, self.target_profile, _created = register_profile(
+                self.layers,
+                self.target_profile.provider,
+                self.target_profile.model,
+            )
+        self.runner_for = runner_for or (lambda _profile: self.runner)
+        self.smoke_profiles = (
+            list(smoke_profiles) if smoke_profiles is not None else _default_smoke_profiles(self.target_profile)
+        )
+        self.smoke_tasks = list(smoke_tasks or [])
+        self.smoke_regression_tolerance = (
+            smoke_regression_tolerance
+            if smoke_regression_tolerance is not None
+            else _smoke_tolerance_from_env()
+        )
+        self.producer_profile = producer_profile or _producer_profile_from_ref(self.target_profile)
+        self.harness = effective_harness(self.layers, self.target_profile)
         self.lineage: list[LineageRecord] = []
         self.attempted_edits: list[AttemptedEdit] = []
         self.proposer_request_log: list[ProposerRoundRecord] | None = None
@@ -168,10 +206,11 @@ class SelfHarnessEngine:
         for round_index in range(round_limit):
             round_dir = self.out_dir / "rounds" / str(round_index)
             round_dir.mkdir(parents=True, exist_ok=True)
+            self.harness = effective_harness(self.layers, self.target_profile)
             write_stable_json(round_dir / "harness_before.json", self.harness)
 
             baseline = evaluate(
-                self.runner,
+                self._runner_for_profile(self.target_profile),
                 self.harness,
                 self.tasks,
                 repeats=self.evaluation_repeats,
@@ -193,11 +232,16 @@ class SelfHarnessEngine:
                 research_findings = self.research_integrator.fetch_findings()
                 if not research_findings.is_empty:
                     patterns = patterns + research_findings.patterns
-                    self.harness = replace(
-                        self.harness,
-                        memory_sources=list(self.harness.memory_sources)
-                        + research_findings.memory_sources,
+                    self.layers = replace(
+                        self.layers,
+                        base=replace(
+                            self.layers.base,
+                            memory_sources=list(self.layers.base.memory_sources)
+                            + research_findings.memory_sources,
+                        ),
                     )
+                    self.harness = effective_harness(self.layers, self.target_profile)
+                    write_stable_json(round_dir / "harness_before.json", self.harness)
                     write_stable_json(
                         round_dir / "research_findings.json",
                         {
@@ -216,6 +260,8 @@ class SelfHarnessEngine:
                 harness=self.harness,
                 round_index=round_index,
                 budget=self.proposal_budget,
+                layers=self.layers,
+                target_profile=self.target_profile,
             )
             validate_proposer_context(context)
             calls_before = len(self._recording_client.calls) if self._recording_client is not None else 0
@@ -223,6 +269,9 @@ class SelfHarnessEngine:
             proposer_attempted = _proposer_attempted_count(self.proposer)
 
             candidate_results: list[tuple[Proposal, HarnessSpec, HarnessPatch, EvaluationResult, AcceptDecision]] = []
+            candidate_layers_by_id: dict[str, HarnessLayers] = {}
+            baseline_by_id: dict[str, EvaluationResult] = {}
+            certification_by_id: dict[str, SmokeCertification | None] = {}
             proposal_rows: list[dict[str, object]] = []
             evaluation_rows: list[dict[str, object]] = _result_rows(
                 "__baseline__",
@@ -262,7 +311,11 @@ class SelfHarnessEngine:
                     )
                     continue
                 try:
-                    candidate_spec, reverse_patch = apply_patch(self.harness, proposal.patch)
+                    candidate_layers, reverse_patch, candidate_spec = apply_patch_to_layers(
+                        self.layers,
+                        proposal.patch,
+                        proposal.target_profile,
+                    )
                 except Exception as exc:
                     proposal_rows.append(
                         _invalid_proposal_row(
@@ -274,8 +327,20 @@ class SelfHarnessEngine:
                     )
                     continue
                 try:
+                    eval_profile = proposal.target_profile or self.target_profile
+                    baseline_for_proposal = (
+                        baseline
+                        if eval_profile == self.target_profile
+                        else evaluate(
+                            self._runner_for_profile(eval_profile),
+                            effective_harness(self.layers, eval_profile),
+                            self.tasks,
+                            repeats=self.evaluation_repeats,
+                            aggregation=self.aggregation,
+                        )
+                    )
                     candidate_eval = evaluate(
-                        self.runner,
+                        self._runner_for_profile(eval_profile),
                         candidate_spec,
                         self.tasks,
                         repeats=self.evaluation_repeats,
@@ -291,10 +356,23 @@ class SelfHarnessEngine:
                         )
                     )
                     continue
-                decision = acceptance_rule(baseline, candidate_eval)
+                decision = acceptance_rule(baseline_for_proposal, candidate_eval)
+                certification = self._certify_smoke(candidate_layers, eval_profile) if decision.accepted else None
+                if certification is not None and not certification.passed:
+                    decision = AcceptDecision(
+                        accepted=False,
+                        reason=f"rejected:certification: {certification.reason}",
+                        baseline_held_in=decision.baseline_held_in,
+                        baseline_held_out=decision.baseline_held_out,
+                        candidate_held_in=decision.candidate_held_in,
+                        candidate_held_out=decision.candidate_held_out,
+                    )
                 candidate_results.append((proposal, candidate_spec, reverse_patch, candidate_eval, decision))
+                candidate_layers_by_id[proposal.id] = candidate_layers
+                baseline_by_id[proposal.id] = baseline_for_proposal
+                certification_by_id[proposal.id] = certification
                 evaluation_rows.extend(
-                    _evaluation_rows(proposal.id, baseline, candidate_eval, self.config.schema_version)
+                    _evaluation_rows(proposal.id, baseline_for_proposal, candidate_eval, self.config.schema_version)
                 )
 
             accepted = pairwise_preference(
@@ -306,22 +384,56 @@ class SelfHarnessEngine:
             reverse_patch = HarnessPatch([])
             after_spec = self.harness
             after_eval = baseline
+            after_layers = self.layers
+            lineage_certification: SmokeCertification | None = None
+            lineage_target_profile: ProfileRef | None = None
             merge_decision: AcceptDecision | None = None
 
             if accepted:
                 merge_group = _build_merge_group(accepted)
                 merged_patch = merge_patches([proposal.patch for proposal, *_rest in merge_group])
-                merged_spec, merged_reverse = apply_patch(self.harness, merged_patch)
+                merge_target_profile = merge_group[0][0].target_profile if merge_group else None
+                merged_layers, merged_reverse, merged_spec = apply_patch_to_layers(
+                    self.layers,
+                    merged_patch,
+                    merge_target_profile,
+                )
+                merge_eval_profile = merge_target_profile or self.target_profile
+                baseline_for_merge = (
+                    baseline
+                    if merge_eval_profile == self.target_profile
+                    else evaluate(
+                        self._runner_for_profile(merge_eval_profile),
+                        effective_harness(self.layers, merge_eval_profile),
+                        self.tasks,
+                        repeats=self.evaluation_repeats,
+                        aggregation=self.aggregation,
+                    )
+                )
                 merged_eval = evaluate(
-                    self.runner,
+                    self._runner_for_profile(merge_eval_profile),
                     merged_spec,
                     self.tasks,
                     repeats=self.evaluation_repeats,
                     aggregation=self.aggregation,
                 )
-                merge_decision = acceptance_rule(baseline, merged_eval)
+                merge_decision = acceptance_rule(baseline_for_merge, merged_eval)
+                merge_certification = (
+                    self._certify_smoke(merged_layers, merge_eval_profile)
+                    if merge_decision.accepted
+                    else None
+                )
+                if merge_certification is not None and not merge_certification.passed:
+                    merge_decision = AcceptDecision(
+                        accepted=False,
+                        reason=f"rejected:certification: {merge_certification.reason}",
+                        baseline_held_in=merge_decision.baseline_held_in,
+                        baseline_held_out=merge_decision.baseline_held_out,
+                        candidate_held_in=merge_decision.candidate_held_in,
+                        candidate_held_out=merge_decision.candidate_held_out,
+                    )
                 evaluation_rows.extend(
-                    _evaluation_rows("__merge__", baseline, merged_eval, self.config.schema_version)
+                    _evaluation_rows("__merge__", baseline_for_merge, merged_eval, self.config.schema_version)
                 )
                 if merge_decision.accepted:
                     chosen_proposals = [proposal for proposal, *_rest in merge_group]
@@ -329,6 +441,9 @@ class SelfHarnessEngine:
                     reverse_patch = merged_reverse
                     after_spec = merged_spec
                     after_eval = merged_eval
+                    after_layers = merged_layers
+                    lineage_certification = merge_certification
+                    lineage_target_profile = merge_target_profile
                 else:
                     best_proposal, best_spec, best_reverse, best_eval, _decision = accepted[0]
                     chosen_proposals = [best_proposal]
@@ -336,6 +451,9 @@ class SelfHarnessEngine:
                     reverse_patch = best_reverse
                     after_spec = best_spec
                     after_eval = best_eval
+                    after_layers = candidate_layers_by_id[best_proposal.id]
+                    lineage_certification = certification_by_id.get(best_proposal.id)
+                    lineage_target_profile = best_proposal.target_profile
 
             for proposal, _spec, _reverse, candidate_eval, decision in candidate_results:
                 status = _proposal_status(proposal, decision, chosen_proposals, merge_decision)
@@ -343,13 +461,15 @@ class SelfHarnessEngine:
                     _proposal_row(
                         proposal,
                         status,
-                        baseline,
+                        baseline_by_id.get(proposal.id, baseline),
                         candidate_eval,
                         decision,
                         self.config.schema_version,
                     )
                 )
             proposal_rows = sorted(proposal_rows, key=lambda row: str(row["id"]))
+            if chosen_proposals and lineage_target_profile is not None:
+                after_layers = mark_profile_certified(after_layers, lineage_target_profile, lineage_certification)
 
             write_jsonl(round_dir / "proposals.jsonl", proposal_rows)
             write_jsonl(round_dir / "evaluations.jsonl", evaluation_rows)
@@ -364,7 +484,10 @@ class SelfHarnessEngine:
                 ops_applied=chosen_patch.ops,
                 reverse_ops=reverse_patch.ops,
                 accepted_proposal_ids=[proposal.id for proposal in chosen_proposals],
-                schema_version=self.config.schema_version,
+                target_profile=lineage_target_profile,
+                producer_profile=_lineage_producer_profile(self.producer_profile, lineage_target_profile),
+                certification=lineage_certification,
+                schema_version=_lineage_schema_version(self.config.schema_version),
             )
             self.lineage.append(lineage_record)
             write_stable_json(self.out_dir / "lineage.json", self.lineage)
@@ -386,10 +509,57 @@ class SelfHarnessEngine:
             # harness forward unchanged (h_{t+1} = h_t) and CONTINUE the fixed
             # t=0..T-1 loop. A stochastic proposer may still surface an acceptable
             # edit in a later round, so the loop must not stop early here.
+            self.layers = after_layers
             self.harness = after_spec
 
         self._write_proposer_request_log()
         return summaries
+
+    def _runner_for_profile(self, profile: ProfileRef | None) -> Runner:
+        if profile is None:
+            return self.runner
+        return self.runner_for(profile)
+
+    def _certify_smoke(self, candidate_layers: HarnessLayers, profile: ProfileRef | None) -> SmokeCertification | None:
+        if profile is None or not self.smoke_tasks:
+            return None
+        smoke_profiles = self.smoke_profiles or [profile]
+        for smoke_profile in smoke_profiles:
+            baseline = evaluate(
+                self._runner_for_profile(smoke_profile),
+                effective_harness(self.layers, smoke_profile),
+                self.smoke_tasks,
+                repeats=1,
+                aggregation=self.aggregation,
+            )
+            candidate = evaluate(
+                self._runner_for_profile(smoke_profile),
+                effective_harness(candidate_layers, smoke_profile),
+                self.smoke_tasks,
+                repeats=1,
+                aggregation=self.aggregation,
+            )
+            regression = baseline.held_in.passed + baseline.held_out.passed - (
+                candidate.held_in.passed + candidate.held_out.passed
+            )
+            if regression > self.smoke_regression_tolerance:
+                return SmokeCertification(
+                    profiles=smoke_profiles,
+                    corpus_ref=self.layers.smoke_corpus_ref,
+                    tolerance=self.smoke_regression_tolerance,
+                    passed=False,
+                    reason=(
+                        f"{smoke_profile.provider}/{smoke_profile.model} smoke regressed by "
+                        f"{regression} pass(es)"
+                    ),
+                )
+        return SmokeCertification(
+            profiles=smoke_profiles,
+            corpus_ref=self.layers.smoke_corpus_ref,
+            tolerance=self.smoke_regression_tolerance,
+            passed=True,
+            reason="smoke passed",
+        )
 
     def _maybe_wrap_llm_proposer(self) -> None:
         if self.proposer_request_log is None or self._recording_client is not None:
@@ -456,6 +626,10 @@ class SelfHarnessEngine:
             },
             "evaluation_repeats": self.evaluation_repeats,
             "seed": self.seed,
+            "target_profile": to_jsonable(self.target_profile),
+            "smoke_profiles": to_jsonable(self.smoke_profiles),
+            "smoke_corpus_ref": self.layers.smoke_corpus_ref,
+            "smoke_regression_tolerance": self.smoke_regression_tolerance,
             "surface_whitelist": sorted(EDITABLE_SURFACES),
             "surface_kinds": {surface: SURFACE_KINDS[surface] for surface in sorted(SURFACE_KINDS)},
             "op_whitelist": sorted(OP_WHITELIST),
@@ -524,13 +698,60 @@ def validate_benchmark_claims(manifest: dict[str, object]) -> None:
         raise PaperFidelityError("terminal-bench@2.0 audit manifests may not claim reproduction")
 
 
+def _producer_profile_from_ref(profile: ProfileRef | None) -> ProducerProfile | None:
+    if profile is None:
+        return None
+    return ProducerProfile(provider=profile.provider, model=profile.model)
+
+
+def _default_smoke_profiles(active_profile: ProfileRef | None) -> list[ProfileRef]:
+    if active_profile is None:
+        return []
+    profiles: list[ProfileRef] = []
+    profiles.append(active_profile)
+    glm_default = make_profile_ref("glm", "glm-5.2")
+    if glm_default not in profiles:
+        profiles.append(glm_default)
+    return profiles
+
+
+def _lineage_producer_profile(
+    producer: ProducerProfile | None,
+    target: ProfileRef | None,
+) -> ProducerProfile | None:
+    if target is None:
+        return producer
+    if producer is not None and producer.provider == target.provider and producer.model == target.model:
+        return producer
+    return _producer_profile_from_ref(target)
+
+
+def _lineage_schema_version(config_schema: str) -> str:
+    return "1.3" if config_schema in {"", "1.0", "1.1", "1.2"} else config_schema
+
+
+def _smoke_tolerance_from_env() -> int:
+    raw = os.environ.get("SELF_HARNESS_SMOKE_TOLERANCE")
+    if raw is None or not raw.strip():
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
+
+
 def _build_merge_group(
     accepted: list[tuple[Proposal, HarnessSpec, HarnessPatch, EvaluationResult, AcceptDecision]],
 ) -> list[tuple[Proposal, HarnessSpec, HarnessPatch, EvaluationResult, AcceptDecision]]:
     group: list[tuple[Proposal, HarnessSpec, HarnessPatch, EvaluationResult, AcceptDecision]] = []
     for candidate in accepted:
         candidate_patch = candidate[0].patch
-        if all(structurally_mergeable(candidate_patch, existing[0].patch) for existing in group):
+        candidate_target = candidate[0].target_profile
+        if all(
+            candidate_target == existing[0].target_profile
+            and structurally_mergeable(candidate_patch, existing[0].patch)
+            for existing in group
+        ):
             group.append(candidate)
     return group
 
@@ -570,6 +791,7 @@ def _proposal_row(
         "op": primary.op,
         "surface": primary.surface,
         "changed_surfaces": changed_surfaces(proposal.patch),
+        "target_profile": to_jsonable(proposal.target_profile),
         "payload": primary.payload,
         "status": status,
         "priority": proposal.priority,
@@ -605,6 +827,7 @@ def _invalid_proposal_row(
         "op": primary.op if primary else None,
         "surface": primary.surface if primary else None,
         "changed_surfaces": changed_surfaces(proposal.patch),
+        "target_profile": to_jsonable(proposal.target_profile),
         "payload": primary.payload if primary else None,
         "status": "invalid",
         "priority": proposal.priority,

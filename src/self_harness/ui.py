@@ -30,10 +30,16 @@ from self_harness.exceptions import InvalidPatchError
 from self_harness.harness import (
     INITIAL_HARNESS_END_MARKER,
     INITIAL_HARNESS_START_MARKER,
-    dump_harness_spec,
     harness_hash,
     load_harness_spec,
     render_initial_harness_source,
+)
+from self_harness.harness_state import (
+    effective_harness,
+    load_harness_state,
+    make_profile_ref,
+    register_profile,
+    write_harness_state,
 )
 from self_harness.llm_proposer import LLMProposer
 from self_harness.model_backend_preflight import (
@@ -43,7 +49,16 @@ from self_harness.model_backend_preflight import (
     model_backend_preflight_report_to_jsonable,
 )
 from self_harness.proposer import HeuristicProposer
-from self_harness.types import HarnessSpec, ProposalBudget, stable_json_dumps, to_jsonable, write_stable_json
+from self_harness.types import (
+    HarnessLayers,
+    HarnessSpec,
+    ProducerProfile,
+    ProfileRef,
+    ProposalBudget,
+    stable_json_dumps,
+    to_jsonable,
+    write_stable_json,
+)
 
 UI_SCHEMA_VERSION = "1.0"
 
@@ -826,17 +841,23 @@ class HarnessUiApp:
                         for key, value in counts.items():
                             accumulated[key] = accumulated.get(key, 0) + value
 
-                initial_spec = self._load_persisted_harness() if evolve else None
+                run_profile = self._profile_for_run_mode(run_mode)
+                initial_layers = self._load_persisted_layers(run_profile) if evolve else None
+                initial_spec = effective_harness(initial_layers, run_profile) if initial_layers is not None else None
                 engine = self._build_engine(
                     run_mode=run_mode,
                     config=config,
                     out_dir=path,
                     initial_spec=initial_spec,
+                    initial_layers=initial_layers,
+                    target_profile=run_profile,
                     on_usage=_accumulate_usage,
                     corpus_path=corpus_path,
                 )
                 summaries = engine.run()
                 engine_result["summaries"] = summaries
+                engine_result["layers"] = engine.layers
+                engine_result["target_profile"] = run_profile
             except Exception as exc:  # noqa: BLE001
                 engine_result["error"] = str(exc)
 
@@ -878,7 +899,12 @@ class HarnessUiApp:
             summaries = engine_result.get("summaries", [])
             promotion: dict[str, Any] | None = None
             if evolve:
-                self._persist_final_harness(path, summaries)
+                self._persist_final_harness(
+                    path,
+                    summaries,
+                    layers=engine_result.get("layers"),
+                    active_profile=engine_result.get("target_profile"),
+                )
                 promotion = self._auto_promote(path, summaries)
             summary = to_jsonable(summarize_audit_run(path))
             with self._lock:
@@ -951,6 +977,8 @@ class HarnessUiApp:
         config: dict[str, int],
         out_dir: Path,
         initial_spec: HarnessSpec | None,
+        initial_layers: HarnessLayers | None,
+        target_profile: ProfileRef,
         on_usage: Callable[[dict[str, int]], None],
         corpus_path: Path | None = None,
     ) -> SelfHarnessEngine:
@@ -979,12 +1007,17 @@ class HarnessUiApp:
                 out_dir=out_dir,
                 config=engine_config,
                 initial_spec=initial_spec,
+                initial_layers=initial_layers,
+                target_profile=target_profile,
+                producer_profile=_producer_profile_from_ref(target_profile),
             )
         if run_mode == "agentic":
             return self._build_agentic_engine(
                 config=config,
                 out_dir=out_dir,
                 initial_spec=initial_spec,
+                initial_layers=initial_layers,
+                target_profile=target_profile,
                 on_usage=on_usage,
                 corpus_path=corpus_path,
             )
@@ -996,6 +1029,8 @@ class HarnessUiApp:
         config: dict[str, int],
         out_dir: Path,
         initial_spec: HarnessSpec | None,
+        initial_layers: HarnessLayers | None,
+        target_profile: ProfileRef,
         on_usage: Callable[[dict[str, int]], None],
         corpus_path: Path | None = None,
     ) -> SelfHarnessEngine:
@@ -1036,6 +1071,9 @@ class HarnessUiApp:
             out_dir=out_dir,
             config=engine_config,
             initial_spec=initial_spec,
+            initial_layers=initial_layers,
+            target_profile=target_profile,
+            producer_profile=_producer_profile_from_ref(target_profile),
             # Agentic GLM solving is stochastic; majority-vote + early-stop denoises the signal and lets
             # the acceptance gate see real task-level improvements (the reproduction/deterministic paths
             # keep the paper-faithful "sum" aggregation).
@@ -1050,20 +1088,30 @@ class HarnessUiApp:
             "no agentic corpus available; expected examples/agentic_corpus.json under the UI root"
         )
 
-    def _load_persisted_harness(self) -> HarnessSpec | None:
+    def _profile_for_run_mode(self, run_mode: str) -> ProfileRef:
+        if run_mode == "agentic":
+            return make_profile_ref("glm", "glm-5.2")
+        return make_profile_ref("deterministic", self.proposer_mode)
+
+    def _load_persisted_layers(self, profile: ProfileRef | None = None) -> HarnessLayers | None:
         if not self.harness_state.is_file():
             return None
         try:
-            value = json.loads(self.harness_state.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            layers = load_harness_state(self.harness_state)
+        except (OSError, InvalidPatchError):
             return None
-        surfaces = value.get("harness") if isinstance(value, dict) else None
-        if not isinstance(surfaces, dict):
+        if profile is None:
+            return layers
+        layers, _profile, created = register_profile(layers, profile.provider, profile.model)
+        if created:
+            write_harness_state(self.harness_state, layers, active_profile=profile)
+        return layers
+
+    def _load_persisted_harness(self) -> HarnessSpec | None:
+        layers = self._load_persisted_layers()
+        if layers is None:
             return None
-        try:
-            return load_harness_spec(surfaces)
-        except InvalidPatchError:
-            return None
+        return effective_harness(layers, None)
 
     def _final_harness_spec(self, run_path: Path) -> HarnessSpec | None:
         """Load the run's final harness from the last round's harness_after.json (raw surface dict)."""
@@ -1085,24 +1133,31 @@ class HarnessUiApp:
                 return None
         return None
 
-    def _persist_final_harness(self, run_path: Path, summaries: list[Any]) -> None:
+    def _persist_final_harness(
+        self,
+        run_path: Path,
+        summaries: list[Any],
+        *,
+        layers: HarnessLayers | None = None,
+        active_profile: ProfileRef | None = None,
+    ) -> None:
         # Only advance the persisted lineage when this run actually promoted an edit, so a no-op run never
         # rewrites the evolving harness with an identical (or, on a bad read, reset) snapshot.
         promoted = any(getattr(summary, "accepted", 0) for summary in summaries)
         if not promoted:
             return
-        spec = self._final_harness_spec(run_path)
-        if spec is None:
-            return
-        payload = {
-            "schema_version": UI_SCHEMA_VERSION,
-            "updated_at": _now(),
-            "source_run": run_path.name,
-            "harness_hash": harness_hash(spec),
-            "harness": dump_harness_spec(spec),
-        }
-        self.harness_state.parent.mkdir(parents=True, exist_ok=True)
-        write_stable_json(self.harness_state, payload)
+        if layers is None:
+            spec = self._final_harness_spec(run_path)
+            if spec is None:
+                return
+            layers = HarnessLayers(base=spec)
+        write_harness_state(
+            self.harness_state,
+            layers,
+            active_profile=active_profile,
+            source_run=run_path.name,
+            updated_at=_now(),
+        )
 
     def _auto_promote(self, run_path: Path, summaries: list[Any]) -> dict[str, Any] | None:
         """Integrate reviewer-approved edits into source automatically (no manual approval step).
@@ -1117,6 +1172,13 @@ class HarnessUiApp:
         promoted = any(getattr(summary, "accepted", 0) for summary in summaries)
         if not promoted:
             return None
+        if _run_has_profile_targeted_promotion(run_path):
+            return {
+                "schema_version": UI_SCHEMA_VERSION,
+                "ok": True,
+                "applied": False,
+                "message": "profile-targeted harness overlay persisted; source promotion skipped",
+            }
         spec = self._final_harness_spec(run_path)
         if spec is None:
             return None
@@ -1137,6 +1199,9 @@ class HarnessUiApp:
             "source_run": value.get("source_run"),
             "harness_hash": value.get("harness_hash"),
             "updated_at": value.get("updated_at"),
+            "schema_version": value.get("schema_version"),
+            "active_profile": value.get("active_profile"),
+            "profiles": _profile_status(value),
         }
 
     def reset_harness_state(self) -> dict[str, Any]:
@@ -1456,6 +1521,34 @@ def _seed_workspace_files(files: dict[str, str], workdir: Path) -> None:
             raise ValueError(f"workspace file escapes workspace: {rel}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
+
+
+def _producer_profile_from_ref(profile: ProfileRef) -> ProducerProfile:
+    return ProducerProfile(provider=profile.provider, model=profile.model)
+
+
+def _profile_status(value: dict[str, Any]) -> dict[str, Any]:
+    overlays = value.get("overlays")
+    if not isinstance(overlays, dict):
+        return {"providers": [], "models": [], "certified": []}
+    providers = overlays.get("providers")
+    models = overlays.get("models")
+    certified = value.get("certified_profiles")
+    return {
+        "providers": sorted(providers) if isinstance(providers, dict) else [],
+        "models": sorted(models) if isinstance(models, dict) else [],
+        "certified": certified if isinstance(certified, list) else [],
+    }
+
+
+def _run_has_profile_targeted_promotion(run_path: Path) -> bool:
+    lineage = _read_json_array(run_path / "lineage.json")
+    for record in lineage:
+        if not isinstance(record, dict):
+            continue
+        if record.get("accepted_proposal_ids") and isinstance(record.get("target_profile"), dict):
+            return True
+    return False
 
 
 def _replace_marked_block(source: str, start_marker: str, end_marker: str, new_block: str) -> str:

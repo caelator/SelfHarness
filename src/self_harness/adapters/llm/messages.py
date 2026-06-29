@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from self_harness.exceptions import LLMClientError
@@ -14,6 +16,46 @@ DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TIMEOUT_SECONDS = 120.0
 _ANTHROPIC_OUTPUT_CONFIG_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+DEFAULT_RATE_LIMIT_MARKERS = ("[1302]", "rate limit", "too many requests", "overloaded")
+
+
+@dataclass(frozen=True)
+class RateLimitPolicy:
+    """Transparent retry/pacing policy for GLM/Z.ai message requests."""
+
+    max_attempts: int = 4
+    base_backoff_seconds: float = 5.0
+    max_backoff_seconds: float = 60.0
+    min_interval_seconds: float = 1.5
+    retryable_statuses: frozenset[int] = frozenset({429})
+    retryable_markers: tuple[str, ...] = DEFAULT_RATE_LIMIT_MARKERS
+
+
+@dataclass
+class RateLimitPacer:
+    """In-memory request pacer shared across turns of one interactive GLM session."""
+
+    clock: Callable[[], float] = time.monotonic
+    sleeper: Callable[[float], None] = time.sleep
+    _next_allowed_at: float = field(default=0.0, init=False)
+
+    def wait_if_needed(self) -> None:
+        delay = self._next_allowed_at - self.clock()
+        if delay > 0:
+            self.sleeper(delay)
+
+    def mark_request_sent(self, policy: RateLimitPolicy) -> None:
+        if policy.min_interval_seconds <= 0:
+            return
+        self._next_allowed_at = max(self._next_allowed_at, self.clock() + policy.min_interval_seconds)
+
+    def cool_down(self, delay_seconds: float) -> None:
+        if delay_seconds <= 0:
+            return
+        self._next_allowed_at = max(self._next_allowed_at, self.clock() + delay_seconds)
+
+    def reset(self) -> None:
+        self._next_allowed_at = 0.0
 
 
 @dataclass(frozen=True)
@@ -73,6 +115,9 @@ class AnthropicAgentTransport(MessagesTransport):
         effort: str | None = None,
         anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        rate_limit_policy: RateLimitPolicy | None = None,
+        rate_limit_pacer: RateLimitPacer | None = None,
+        on_rate_limit_retry: Callable[[int, float, str], None] | None = None,
     ) -> None:
         if not base_url.strip():
             raise ValueError("base_url must be non-empty")
@@ -86,6 +131,9 @@ class AnthropicAgentTransport(MessagesTransport):
         self.effort = effort
         self.anthropic_version = anthropic_version
         self.timeout_seconds = timeout_seconds
+        self.rate_limit_policy = rate_limit_policy
+        self.rate_limit_pacer = rate_limit_pacer
+        self.on_rate_limit_retry = on_rate_limit_retry
 
     def create_message(
         self,
@@ -96,26 +144,35 @@ class AnthropicAgentTransport(MessagesTransport):
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> MessagesTurn:
         payload = _build_payload(self.model, system, messages, tools, max_tokens, effort=self.effort)
-        request = urllib.request.Request(
-            _messages_url(self.base_url),
-            data=(stable_json_dumps(payload) + "\n").encode("utf-8"),
-            headers=_anthropic_headers(self.api_key, self.anthropic_version),
-            method="POST",
+
+        def _send_once() -> MessagesTurn:
+            request = urllib.request.Request(
+                _messages_url(self.base_url),
+                data=(stable_json_dumps(payload) + "\n").encode("utf-8"),
+                headers=_anthropic_headers(self.api_key, self.anthropic_version),
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    raw = response.read().decode("utf-8")
+            except urllib.error.HTTPError as exc:
+                raise LLMClientError(_http_error_detail(exc)) from exc
+            except urllib.error.URLError as exc:
+                raise LLMClientError(f"messages request failed: {exc.reason}") from exc
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise LLMClientError("messages response was not valid JSON") from exc
+            if not isinstance(data, Mapping):
+                raise LLMClientError("messages response must be a JSON object")
+            return _parse_messages_response(data)
+
+        return _with_rate_limit_retries(
+            _send_once,
+            policy=self.rate_limit_policy,
+            pacer=self.rate_limit_pacer,
+            on_retry=self.on_rate_limit_retry,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            raise LLMClientError(_http_error_detail(exc)) from exc
-        except urllib.error.URLError as exc:
-            raise LLMClientError(f"messages request failed: {exc.reason}") from exc
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise LLMClientError("messages response was not valid JSON") from exc
-        if not isinstance(data, Mapping):
-            raise LLMClientError("messages response must be a JSON object")
-        return _parse_messages_response(data)
 
 
 class StreamingAnthropicAgentTransport(MessagesTransport):
@@ -141,6 +198,9 @@ class StreamingAnthropicAgentTransport(MessagesTransport):
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         on_text_delta: Callable[[str], None] | None = None,
         on_tool_start: Callable[[str], None] | None = None,
+        rate_limit_policy: RateLimitPolicy | None = None,
+        rate_limit_pacer: RateLimitPacer | None = None,
+        on_rate_limit_retry: Callable[[int, float, str], None] | None = None,
     ) -> None:
         if not base_url.strip():
             raise ValueError("base_url must be non-empty")
@@ -156,6 +216,9 @@ class StreamingAnthropicAgentTransport(MessagesTransport):
         self.timeout_seconds = timeout_seconds
         self.on_text_delta = on_text_delta
         self.on_tool_start = on_tool_start
+        self.rate_limit_policy = rate_limit_policy
+        self.rate_limit_pacer = rate_limit_pacer
+        self.on_rate_limit_retry = on_rate_limit_retry
 
     def create_message(
         self,
@@ -169,19 +232,28 @@ class StreamingAnthropicAgentTransport(MessagesTransport):
         payload["stream"] = True
         headers = _anthropic_headers(self.api_key, self.anthropic_version)
         headers["Accept"] = "text/event-stream"
-        request = urllib.request.Request(
-            _messages_url(self.base_url),
-            data=(stable_json_dumps(payload) + "\n").encode("utf-8"),
-            headers=headers,
-            method="POST",
+
+        def _send_once() -> MessagesTurn:
+            request = urllib.request.Request(
+                _messages_url(self.base_url),
+                data=(stable_json_dumps(payload) + "\n").encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    return self._consume_stream(response)
+            except urllib.error.HTTPError as exc:
+                raise LLMClientError(_http_error_detail(exc)) from exc
+            except urllib.error.URLError as exc:
+                raise LLMClientError(f"messages request failed: {exc.reason}") from exc
+
+        return _with_rate_limit_retries(
+            _send_once,
+            policy=self.rate_limit_policy,
+            pacer=self.rate_limit_pacer,
+            on_retry=self.on_rate_limit_retry,
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                return self._consume_stream(response)
-        except urllib.error.HTTPError as exc:
-            raise LLMClientError(_http_error_detail(exc)) from exc
-        except urllib.error.URLError as exc:
-            raise LLMClientError(f"messages request failed: {exc.reason}") from exc
 
     def _consume_stream(self, response: Any) -> MessagesTurn:
         builder = _StreamBuilder(on_text_delta=self.on_text_delta, on_tool_start=self.on_tool_start)
@@ -251,9 +323,78 @@ def _anthropic_headers(api_key: str, anthropic_version: str) -> dict[str, str]:
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
     body = _read_error_body(exc)
     detail = f"messages HTTP error: status={exc.code}"
+    retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+    if retry_after:
+        detail = f"{detail}; retry_after={retry_after}"
     if body:
         detail = f"{detail}; body={body}"
     return detail
+
+
+def _with_rate_limit_retries(
+    send_once: Callable[[], MessagesTurn],
+    *,
+    policy: RateLimitPolicy | None,
+    pacer: RateLimitPacer | None,
+    on_retry: Callable[[int, float, str], None] | None,
+) -> MessagesTurn:
+    if policy is None or policy.max_attempts <= 1:
+        if pacer is not None and policy is not None:
+            pacer.wait_if_needed()
+            pacer.mark_request_sent(policy)
+        return send_once()
+    attempt = 1
+    while True:
+        if pacer is not None:
+            pacer.wait_if_needed()
+            pacer.mark_request_sent(policy)
+        try:
+            turn = send_once()
+        except LLMClientError as exc:
+            reason = _retryable_rate_limit_reason(str(exc), policy)
+            if reason is None or attempt >= policy.max_attempts:
+                raise
+            delay = _retry_delay_seconds(str(exc), policy, attempt)
+            if on_retry is not None:
+                on_retry(attempt, delay, reason)
+            if pacer is not None:
+                pacer.cool_down(delay)
+            else:
+                time.sleep(delay)
+            attempt += 1
+            continue
+        return turn
+
+
+def _retryable_rate_limit_reason(text: str, policy: RateLimitPolicy) -> str | None:
+    status = _status_code_from_error(text)
+    if status in policy.retryable_statuses:
+        return f"status {status}"
+    lowered = text.lower()
+    for marker in policy.retryable_markers:
+        if marker.lower() in lowered:
+            return marker
+    return None
+
+
+def _status_code_from_error(text: str) -> int | None:
+    match = re.search(r"\bstatus=(\d{3})\b", text)
+    return int(match.group(1)) if match else None
+
+
+def _retry_delay_seconds(text: str, policy: RateLimitPolicy, failed_attempt: int) -> float:
+    retry_after = _retry_after_seconds(text)
+    if retry_after is not None:
+        return min(policy.max_backoff_seconds, max(0.0, retry_after))
+    delay = float(policy.base_backoff_seconds) * float(2 ** max(0, failed_attempt - 1))
+    return float(min(policy.max_backoff_seconds, max(0.0, delay)))
+
+
+def _retry_after_seconds(text: str) -> float | None:
+    match = re.search(r"\bretry_after=([0-9]+(?:\.[0-9]+)?)\b", text)
+    if match:
+        return float(match.group(1))
+    return None
 
 
 class _StreamBuilder:

@@ -20,7 +20,7 @@ The active provider can be changed without restarting the CLI.
 /effort high
 ```
 
-Supported providers:
+Supported main providers:
 
 - `glm`: GLM 5.2 through Z.ai.
 - `codex`: local `codex exec` in headless mode.
@@ -33,9 +33,10 @@ server-provided Codex model cache for Codex. Codex can also fall back to OpenAI 
 uses Anthropic `/v1/models` when `ANTHROPIC_API_KEY` is available. If discovery is not available,
 choose `custom` to enter a model id without leaving the TUI.
 
-Reasoning effort is provider-scoped. Codex supports `none`, `minimal`, `low`, `medium`, `high`, and
-`xhigh`; Claude supports `low`, `medium`, `high`, `xhigh`, and `max`. GLM/Z.ai and Agy do not expose
-an effort control in this CLI.
+Reasoning effort is provider-scoped and model-aware. Codex supports `none`, `minimal`, `low`,
+`medium`, `high`, and `xhigh`; Claude supports `low`, `medium`, `high`, `xhigh`, and `max`.
+GLM/Z.ai exposes effort for models that advertise it through Z.ai model metadata. Agy exposes effort
+as part of model choice text rather than a separate flag.
 
 Persistent defaults:
 
@@ -43,10 +44,40 @@ Persistent defaults:
 self-harness settings set code_provider codex
 self-harness settings set code_model gpt-5.6
 self-harness settings set code_effort xhigh
+self-harness settings set glm_retry_max_attempts 4
+self-harness settings set glm_request_min_interval_seconds 1.5
 ```
 
 The older `settings set model codex|agy|claude|glm-5.2` compatibility path still works, but
 `code_provider`, `code_model`, and `code_effort` are the preferred settings.
+
+## GLM Rate Limits And Helper Delegation
+
+When GLM/Z.ai returns explicit rate-limit or overload markers such as `[1302]`, HTTP `429`, `rate
+limit`, `too many requests`, or `overloaded`, SelfHarness keeps GLM as the active provider and retries
+with bounded exponential backoff. The retry policy is configurable without editing code:
+
+```bash
+self-harness settings set glm_retry_max_attempts 4
+self-harness settings set glm_retry_base_backoff_seconds 5
+self-harness settings set glm_retry_max_backoff_seconds 60
+self-harness settings set glm_request_min_interval_seconds 1.5
+```
+
+There is no silent provider fallback. If Z.ai is still rate-limiting after retries, wait and send
+`continue`, lower request pressure, or explicitly delegate one helper subtask:
+
+```text
+/helpers
+/helpers on
+/delegate codex inspect the failing test output and summarize the likely fix
+```
+
+Helpers are opt-in and disabled by default. `/delegate` can use `codex`, `agy`, or `claude` when the
+corresponding CLI is installed or configured with `SELF_HARNESS_CODEX_BINARY`,
+`SELF_HARNESS_AGY_BINARY`, or `SELF_HARNESS_CLAUDE_BINARY`. Helper output is appended to the current
+conversation as context for the main provider; it does not change `/whoami`, `/status`, or the
+configured provider/model.
 
 ## Threads
 
@@ -73,6 +104,8 @@ active backend object. It does not restart the terminal.
 /feedback    alias for /report
 /harvested   list command bundles and admitted UX reports
 /rejected    list rejected UX captures and admission reasons
+/helpers     list/toggle optional helper CLI delegation
+/delegate    pass one subtask to an enabled helper CLI
 /save        write the current thread now
 /clear       clear the terminal
 /reset       clear current thread history

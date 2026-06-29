@@ -67,6 +67,8 @@ Code — the interactive coding agent
     • /status, /history    inspect the active thread and recent turns.
     • /report, /feedback   capture semantic/control-plane UX issues for secondary judging.
     • /harvested, /rejected inspect admitted and rejected harvest bundles.
+    • /helpers on          enable optional codex/agy/claude helper delegation.
+    • /delegate codex ...   send one explicit subtask to a helper without switching providers.
     • /exit, /quit, /q     leave. Ctrl-C exits at the prompt; during a turn it interrupts.
 
   Auto-run: commands execute directly on your machine (no sandbox). Use it on code you trust.
@@ -109,8 +111,10 @@ Settings — configuration without environment variables
     self-harness settings set <key> <value>
     self-harness settings path              print the config file location
   Stored in ~/.config/self-harness/config.json (owner-only, 0600).
-  Keys: api_key, base_url, model, code_provider, code_model, code_effort, max_steps,
-        tool_timeout_seconds, auto_promote, harvest, share_central_harness, loop_eval_repeats.
+  Keys: api_key, base_url, model, code_provider, code_model, code_effort, code_helpers_enabled,
+        glm_retry_max_attempts, glm_retry_base_backoff_seconds, glm_retry_max_backoff_seconds,
+        glm_request_min_interval_seconds, max_steps, tool_timeout_seconds, auto_promote, harvest,
+        share_central_harness, loop_eval_repeats.
   `self-harness code` also exposes these through /menu, /model, and /config without leaving the TUI.
 """,
     "key": """\
@@ -222,6 +226,11 @@ _SETTING_LABELS = {
     "code_provider": "Code: active provider (glm, codex, agy, claude)",
     "code_model": "Code: provider model override",
     "code_effort": "Code: reasoning effort override",
+    "code_helpers_enabled": "Code: enable explicit helper delegation",
+    "glm_retry_max_attempts": "GLM: retry attempts for rate limits",
+    "glm_retry_base_backoff_seconds": "GLM: base retry backoff (s)",
+    "glm_retry_max_backoff_seconds": "GLM: max retry backoff (s)",
+    "glm_request_min_interval_seconds": "GLM: minimum interval between requests (s)",
     "max_steps": "Coding agent: max steps per turn",
     "tool_timeout_seconds": "Coding agent: per-command timeout (s)",
     "auto_promote": "Loop: auto-integrate accepted edits into source",

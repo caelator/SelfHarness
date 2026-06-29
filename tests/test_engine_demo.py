@@ -41,7 +41,7 @@ def test_demo_end_to_end_and_deterministic(tmp_path: Path) -> None:
     assert all(row["evaluation_repeats"] == 2 for row in evaluation_rows)
     assert all("failure_category" in row for row in evaluation_rows)
     lineage = json.loads((first / "lineage.json").read_text())
-    assert all(row["schema_version"] == "1.2" for row in lineage)
+    assert all(row["schema_version"] == "1.3" for row in lineage)
     assert _tree_bytes(first) == _tree_bytes(second)
 
 
