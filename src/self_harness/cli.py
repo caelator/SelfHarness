@@ -1921,6 +1921,7 @@ def _run_code(
         resolve_zai_base_url,
     )
     from self_harness.cli_agent import FailureHarvester, HeadlessCliSession, InteractiveSession, run_repl
+    from self_harness.cli_agent.effort import normalize_effort, validate_effort_for_provider
     from self_harness.cli_agent.session import load_session_harness
     from self_harness.cli_agent.sessions import latest_session, load_session
     from self_harness.exceptions import AgenticRunnerError
@@ -1940,7 +1941,18 @@ def _run_code(
     cfg = user_config.load_config()
     provider = user_config.resolve_code_provider(config=cfg)
     model = user_config.resolve_code_model(provider=provider, config=cfg)
-    effort = user_config.resolve_code_effort(provider=provider, config=cfg)
+    raw_effort = user_config.resolve_code_effort(provider=provider, config=cfg)
+    effort_warning = None
+    effort = None
+    if provider in {"codex", "claude"} and raw_effort:
+        effort = normalize_effort(raw_effort)
+        try:
+            if effort is None:
+                raise ValueError(f"unrecognized effort: {raw_effort!r}")
+            effort = validate_effort_for_provider(provider, effort)
+        except ValueError as exc:
+            effort_warning = f"ignored code_effort={raw_effort!r}: {exc}"
+            effort = None
     headless_backend = None if provider == "glm" else _headless_backend_for_model(provider)
     model_binary = _headless_binary_for_backend(headless_backend) if headless_backend is not None else None
     model, model_warning = _served_code_model_or_default(provider, model, binary=model_binary)
@@ -1958,6 +1970,8 @@ def _run_code(
         print(line)
     if model_warning is not None:
         print(f"warning: {model_warning}")
+    if effort_warning is not None:
+        print(f"warning: {effort_warning}")
     if headless_backend is not None:
         model_text = model or "provider default"
         effort_text = effort or "provider default"

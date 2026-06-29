@@ -17,6 +17,14 @@ from self_harness import user_config
 from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
 from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
 from self_harness.cli_agent.context import expand_mentions
+from self_harness.cli_agent.effort import (
+    EFFORT_ALIASES,
+    effort_help,
+    normalize_effort,
+    supported_efforts,
+    valid_effort_or_none,
+    validate_effort_for_provider,
+)
 from self_harness.cli_agent.model_discovery import ModelCatalog, discover_provider_models
 from self_harness.cli_agent.session import HeadlessCliSession, InteractiveSession, headless_binary_for_backend
 from self_harness.cli_agent.sessions import SessionRecord, list_sessions, load_session, save_session
@@ -24,6 +32,7 @@ from self_harness.cli_agent.ui import BackRequested, ConsoleRenderer
 from self_harness.exceptions import AgenticRunnerError
 
 CodeSession = InteractiveSession | HeadlessCliSession
+_KNOWN_EFFORTS_TEXT = "none, minimal, low, medium, high, xhigh, max"
 
 _PROVIDER_ALIASES = {
     "codex": "codex",
@@ -39,19 +48,6 @@ _PROVIDER_ALIASES = {
     "zai": "glm",
     "z.ai": "glm",
 }
-_EFFORT_ALIASES = {
-    "low": "low",
-    "medium": "medium",
-    "med": "medium",
-    "high": "high",
-    "xhigh": "xhigh",
-    "x-high": "xhigh",
-    "extra-high": "xhigh",
-    "extra_high": "xhigh",
-    "extra high": "xhigh",
-    "max": "max",
-}
-
 _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/menu", "open the command palette"),
     ("/commands", "open the command palette"),
@@ -85,7 +81,7 @@ Commands:
   /menu        open the TUI command palette
   /model       open model/provider picker, or set directly: /model codex gpt-5.6 xhigh
   /provider    switch provider: /provider codex|agy|claude|glm
-  /effort      open/set effort: /effort low|medium|high|xhigh|max
+  /effort      open/set effort for Codex or Claude
   /threads     open thread picker; /thread new; /thread switch <id-or-number>
   /status      show cwd, thread, harness, model, and runtime controls
   /config      open runtime settings picker
@@ -467,9 +463,10 @@ def _handle_provider_command(session: CodeSession, raw: str, renderer: ConsoleRe
 
 
 def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRenderer) -> CodeSession:
+    provider = _provider(session)
     if not raw:
         try:
-            picked = _effort_picker(session, renderer)
+            picked = _effort_picker(session, renderer, provider=provider)
         except BackRequested:
             return session
         if picked is None:
@@ -478,15 +475,25 @@ def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRend
         raw = picked
     effort = _normalize_effort(raw)
     if effort is None:
-        renderer.error("  ! effort must be one of: low, medium, high, xhigh, max")
+        if supported_efforts(provider):
+            renderer.error(f"  ! effort must be one of: {effort_help(provider)}")
+        else:
+            renderer.error(f"  ! {provider} does not support reasoning effort")
+        return session
+    try:
+        effort = validate_effort_for_provider(provider, effort)
+    except ValueError as exc:
+        renderer.error(f"  ! {exc}")
         return session
     selected: CodeSession
     if isinstance(session, HeadlessCliSession):
         session.effort = effort
         selected = session
     else:
-        renderer.info("GLM/Z.ai does not expose an effort control here; saved for the next headless backend.")
+        renderer.error(f"  ! {provider} does not support reasoning effort; switch to Codex or Claude first.")
         selected = session
+        renderer.info(_model_status(selected))
+        return selected
     _persist_code_selection(selected, effort=effort)
     renderer.info(_model_status(selected))
     return selected
@@ -539,13 +546,14 @@ def _model_palette_for_provider(
         if model_cancelled:
             return session
         model = selected_model
-        effort = getattr(session, "effort", None)
+        current_effort = valid_effort_or_none(provider, getattr(session, "effort", None))
+        effort = current_effort
         if provider in {"codex", "claude"}:
             try:
-                selected_effort = _effort_picker(session, renderer, current=effort)
+                selected_effort = _effort_picker(session, renderer, current=current_effort, provider=provider)
             except BackRequested:
                 continue
-            effort = selected_effort or effort
+            effort = selected_effort if selected_effort is not None else current_effort
         elif provider == "agy":
             renderer.info("Agy exposes model selection; no effort flag is advertised by this install.")
             effort = None
@@ -623,28 +631,35 @@ def _effort_picker(
     renderer: ConsoleRenderer,
     *,
     current: str | None = None,
+    provider: str | None = None,
 ) -> str | None:
-    current_effort = current or getattr(session, "effort", None)
+    selected_provider = provider or _provider(session)
+    supported = supported_efforts(selected_provider)
+    if not supported:
+        renderer.error(f"  ! {selected_provider} does not support reasoning effort")
+        return None
+    current_effort = valid_effort_or_none(selected_provider, current or getattr(session, "effort", None))
+    options = [(str(index), _effort_label(value)) for index, value in enumerate(supported, start=1)]
+    options.append(("0", "provider default / unchanged"))
+    mapping: dict[str, str | None] = {str(index): value for index, value in enumerate(supported, start=1)}
+    mapping.update({"0": None, "": None})
     renderer.menu(
-        "Reasoning Effort",
-        [
-            ("1", "low"),
-            ("2", "medium"),
-            ("3", "high"),
-            ("4", "xhigh / extra high"),
-            ("5", "max"),
-            ("0", "provider default / unchanged"),
-        ],
+        f"{selected_provider.upper()} Reasoning Effort",
+        options,
         footer=f"current: {current_effort or 'provider default'}",
     )
     choice = renderer.ask("effort").strip().lower()
-    mapping = {"1": "low", "2": "medium", "3": "high", "4": "xhigh", "5": "max", "0": None, "": None}
     if choice in mapping:
         return mapping[choice]
     effort = _normalize_effort(choice)
     if effort is None:
-        renderer.error("  ! effort must be one of: low, medium, high, xhigh, max")
-    return effort
+        renderer.error(f"  ! effort must be one of: {effort_help(selected_provider)}")
+        return None
+    try:
+        return validate_effort_for_provider(selected_provider, effort)
+    except ValueError as exc:
+        renderer.error(f"  ! {exc}")
+        return None
 
 
 def _parse_model_selection(raw: str, *, default_provider: str) -> tuple[str, str | None, str | None]:
@@ -673,7 +688,7 @@ def _parse_model_selection(raw: str, *, default_provider: str) -> tuple[str, str
                 raise ValueError("--effort needs a level")
             effort = _normalize_effort(tokens[idx])
             if effort is None:
-                raise ValueError("effort must be one of: low, medium, high, xhigh, max")
+                raise ValueError(f"effort must be one of: {_KNOWN_EFFORTS_TEXT}")
         else:
             rest.append(token)
         idx += 1
@@ -686,6 +701,7 @@ def _parse_model_selection(raw: str, *, default_provider: str) -> tuple[str, str
         effort = effort_from_tail
 
     model = _normalize_model_name(rest)
+    effort = validate_effort_for_provider(provider, effort)
     return provider, model, effort
 
 
@@ -697,6 +713,11 @@ def _switch_code_backend(
     effort: str | None,
     renderer: ConsoleRenderer,
 ) -> CodeSession:
+    try:
+        effort = validate_effort_for_provider(provider, effort)
+    except ValueError as exc:
+        renderer.error(f"  ! {exc}")
+        return session
     if provider == "glm":
         try:
             api_key = resolve_zai_api_key()
@@ -792,14 +813,19 @@ def _is_provider(value: str) -> bool:
 
 
 def _normalize_effort(value: str) -> str | None:
-    normalized = value.strip().lower().replace("_", "-")
-    return _EFFORT_ALIASES.get(normalized)
+    return normalize_effort(value)
+
+
+def _effort_label(value: str) -> str:
+    if value == "xhigh":
+        return "xhigh / extra high"
+    return value
 
 
 def _pop_effort(tokens: list[str]) -> str | None:
     if len(tokens) >= 2:
         pair = f"{tokens[-2]} {tokens[-1]}".lower().replace("_", "-")
-        effort = _EFFORT_ALIASES.get(pair)
+        effort = EFFORT_ALIASES.get(pair)
         if effort is not None:
             del tokens[-2:]
             return effort

@@ -700,6 +700,10 @@ Codex model cache and can fall back to OpenAI `/v1/models`; Claude uses the
 Anthropic model API when `ANTHROPIC_API_KEY` is available. If a catalog cannot
 be queried, the picker says why and offers a custom model id.
 
+Reasoning effort is provider-scoped. Codex supports `none`, `minimal`, `low`,
+`medium`, `high`, and `xhigh`; Claude supports `low`, `medium`, `high`,
+`xhigh`, and `max`. GLM/Z.ai and Agy do not expose effort controls here.
+
 Provider defaults can also be set before launch:
 
 ```bash

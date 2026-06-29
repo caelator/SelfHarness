@@ -33,6 +33,10 @@ server-provided Codex model cache for Codex. Codex can also fall back to OpenAI 
 uses Anthropic `/v1/models` when `ANTHROPIC_API_KEY` is available. If discovery is not available,
 choose `custom` to enter a model id without leaving the TUI.
 
+Reasoning effort is provider-scoped. Codex supports `none`, `minimal`, `low`, `medium`, `high`, and
+`xhigh`; Claude supports `low`, `medium`, `high`, `xhigh`, and `max`. GLM/Z.ai and Agy do not expose
+an effort control in this CLI.
+
 Persistent defaults:
 
 ```bash

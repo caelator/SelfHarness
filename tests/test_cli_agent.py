@@ -274,6 +274,40 @@ printf '%s\\n' "headless fixed it"
             assert "high" in args
 
 
+def test_headless_command_filters_provider_invalid_effort(tmp_path: Path) -> None:
+    from self_harness.cli_agent.session import _headless_command
+
+    codex_max = _headless_command(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        last_message_path=tmp_path / "last.txt",
+        timeout_seconds=30,
+        effort="max",
+    )
+    codex_xhigh = _headless_command(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        last_message_path=tmp_path / "last.txt",
+        timeout_seconds=30,
+        effort="xhigh",
+    )
+    claude_max = _headless_command(
+        backend="claude",
+        binary="claude",
+        workdir=tmp_path,
+        last_message_path=tmp_path / "last.txt",
+        timeout_seconds=30,
+        effort="max",
+    )
+
+    assert not any("model_reasoning_effort" in part for part in codex_max)
+    assert 'model_reasoning_effort="xhigh"' in codex_xhigh
+    assert "--effort" in claude_max
+    assert "max" in claude_max
+
+
 def test_repl_model_command_changes_headless_model_and_effort(
     tmp_path: Path,
     monkeypatch,
@@ -506,6 +540,125 @@ def test_model_picker_escape_from_custom_returns_to_model_list(
     assert model is None
     assert cancelled is False
     assert renderer.prompts == ["model", "custom model id", "model"]
+
+
+def test_effort_picker_scopes_choices_to_codex(tmp_path: Path) -> None:
+    from self_harness.cli_agent import repl
+
+    renderer = ScriptedRenderer(["0"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        effort="max",
+    )
+
+    picked = repl._effort_picker(session, renderer, provider="codex", current="max")
+
+    assert picked is None
+    title, options, footer = renderer.menus[-1]
+    labels = [label for _key, label in options]
+    assert title == "CODEX Reasoning Effort"
+    assert "none" in labels
+    assert "minimal" in labels
+    assert "xhigh / extra high" in labels
+    assert "max" not in labels
+    assert footer == "current: provider default"
+
+
+def test_effort_picker_allows_claude_max(tmp_path: Path) -> None:
+    from self_harness.cli_agent import repl
+
+    renderer = ScriptedRenderer(["5"])
+    session = HeadlessCliSession(
+        backend="claude",
+        binary="claude",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    assert repl._effort_picker(session, renderer, provider="claude") == "max"
+    assert ("5", "max") in renderer.menus[-1][1]
+
+
+def test_model_command_rejects_codex_max_effort(tmp_path: Path, monkeypatch) -> None:
+    from self_harness.cli_agent import repl
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    renderer = ScriptedRenderer([])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._handle_model_command(session, "codex gpt-5.6 max", renderer)
+
+    assert selected is session
+    assert session.model is None
+    assert session.effort is None
+    assert renderer.errors == ["  ! effort for codex must be one of: none, minimal, low, medium, high, xhigh"]
+
+
+def test_model_command_allows_claude_max_effort(tmp_path: Path, monkeypatch) -> None:
+    from self_harness.cli_agent import repl
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    renderer = ScriptedRenderer([])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._handle_model_command(session, "claude sonnet max", renderer)
+
+    assert isinstance(selected, HeadlessCliSession)
+    assert selected.backend == "claude"
+    assert selected.model == "sonnet"
+    assert selected.effort == "max"
+
+
+def test_code_startup_ignores_stale_codex_max_effort(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    import self_harness.cli as cli
+    import self_harness.cli_agent as cli_agent
+    from self_harness import user_config
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    cfg = user_config.load_config()
+    cfg.set("code_provider", "codex")
+    cfg.set("code_effort", "max")
+    cfg.save()
+    captured: dict[str, HeadlessCliSession] = {}
+
+    def fake_run_repl(session: HeadlessCliSession, **_kwargs: object) -> int:
+        captured["session"] = session
+        return 0
+
+    monkeypatch.setattr(cli_agent, "run_repl", fake_run_repl)
+    monkeypatch.setattr(cli, "_served_code_model_or_default", lambda provider, model, binary=None: (model, None))
+
+    assert cli._run_code(
+        root=tmp_path,
+        harness_state=None,
+        inbox_dir=None,
+        max_steps=1,
+        tool_timeout_seconds=1,
+        harvest=False,
+        resume=None,
+        plain=True,
+        local_harness=True,
+    ) == 0
+
+    assert captured["session"].effort is None
+    assert "ignored code_effort='max': effort for codex must be one of:" in capsys.readouterr().out
 
 
 def test_model_options_do_not_offer_incompatible_current_model() -> None:

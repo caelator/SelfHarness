@@ -20,6 +20,7 @@ from self_harness.adapters.llm.messages import (
     StreamingAnthropicAgentTransport,
 )
 from self_harness.adapters.terminal_bench.agent_render import render_system_prompt
+from self_harness.cli_agent.effort import valid_effort_or_none
 from self_harness.cli_agent.harvest import FailureHarvester
 from self_harness.exceptions import InvalidPatchError
 from self_harness.harness import harness_hash, initial_harness, load_harness_spec
@@ -362,6 +363,7 @@ def _headless_command(
 ) -> list[str]:
     model = model or _headless_model_override(backend)
     effort = effort or _headless_effort_override(backend)
+    effort = valid_effort_or_none(backend, effort)
     if backend == "codex":
         command = [
             binary,
