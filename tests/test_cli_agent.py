@@ -176,6 +176,7 @@ def test_interactive_session_system_prompt_includes_glm_identity(tmp_path: Path)
         harness=initial_harness(),
         harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
         model="glm-5.2",
+        effort="high",
     )
     session._transport = transport
 
@@ -183,6 +184,7 @@ def test_interactive_session_system_prompt_includes_glm_identity(tmp_path: Path)
 
     assert "SelfHarness Code provider: GLM via Z.ai." in transport.systems[-1]
     assert "Configured model id: glm-5.2." in transport.systems[-1]
+    assert "Configured reasoning effort: high." in transport.systems[-1]
     assert "Do not infer identity from the API protocol or compatibility layer." in transport.systems[-1]
 
 
@@ -394,12 +396,13 @@ def test_repl_identity_question_is_answered_locally(tmp_path: Path, monkeypatch,
         harness=initial_harness(),
         harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
         model="glm-5.2",
+        effort="xhigh",
     )
 
     assert run_repl(session, banner=False, root=None, plain=True) == 0
 
     out = capsys.readouterr().out
-    assert "provider: glm, model: glm-5.2, effort: provider default" in out
+    assert "provider: glm, model: glm-5.2, effort: xhigh" in out
     assert "transport: Z.ai Anthropic-compatible Messages API" in out
     assert "glm ›" not in out
 
@@ -569,7 +572,7 @@ def test_model_palette_queries_provider_models(
 ) -> None:
     from self_harness import user_config
     from self_harness.cli_agent import repl
-    from self_harness.cli_agent.model_discovery import ModelCatalog
+    from self_harness.cli_agent.model_discovery import EffortCatalog, ModelCatalog
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     calls: list[tuple[str, str | None]] = []
@@ -579,6 +582,11 @@ def test_model_palette_queries_provider_models(
         return ModelCatalog(("gpt-live-a", "gpt-live-b"), "fake live catalog")
 
     monkeypatch.setattr(repl, "discover_provider_models", fake_discover)
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_efforts",
+        lambda provider, *, model=None, binary=None: EffortCatalog(("low", "high"), "fake effort catalog"),
+    )
     renderer = ScriptedRenderer(["1", "2", "0"])
     session = HeadlessCliSession(
         backend="codex",
@@ -597,7 +605,90 @@ def test_model_palette_queries_provider_models(
     assert renderer.menus[1][0] == "CODEX Models"
     assert ("2", "gpt-live-b") in renderer.menus[1][1]
     assert "source: fake live catalog" in renderer.menus[1][2]
+    assert renderer.menus[2][0] == "CODEX Reasoning Effort"
+    assert ("1", "low") in renderer.menus[2][1]
+    assert ("2", "high") in renderer.menus[2][1]
+    assert "source: fake effort catalog" in renderer.menus[2][2]
     assert user_config.load_config().get("code_model") == "gpt-live-b"
+
+
+def test_model_palette_uses_discovered_codex_efforts(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import EffortCatalog, ModelCatalog
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_models",
+        lambda provider, *, binary=None: ModelCatalog(("gpt-high-only",), "fake live catalog"),
+    )
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_efforts",
+        lambda provider, *, model=None, binary=None: EffortCatalog(("high",), "Codex models cache"),
+    )
+    renderer = ScriptedRenderer(["1", "1", "1"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._model_palette(session, renderer)
+
+    assert isinstance(selected, HeadlessCliSession)
+    assert selected.model == "gpt-high-only"
+    assert selected.effort == "high"
+    assert renderer.prompts == ["provider", "model", "effort"]
+    assert renderer.menus[2][1] == [("1", "high"), ("0", "provider default / unchanged")]
+
+
+def test_model_palette_disables_glm_effort_for_models_without_support(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import EffortCatalog, ModelCatalog
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("ZAI_API_KEY", "secret")
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_models",
+        lambda provider, *, binary=None: ModelCatalog(("glm-5.1",), "Z.ai /models"),
+    )
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_efforts",
+        lambda provider, *, model=None, binary=None: EffortCatalog(
+            (),
+            "Z.ai /models",
+            "glm-5.1 does not advertise effort",
+            fallback_allowed=False,
+        ),
+    )
+    renderer = ScriptedRenderer(["4", "1"])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._model_palette(session, renderer)
+
+    assert isinstance(selected, InteractiveSession)
+    assert selected.model == "glm-5.1"
+    assert selected.effort is None
+    assert renderer.errors == [
+        "  ! glm does not support reasoning effort for glm-5.1: glm-5.1 does not advertise effort"
+    ]
 
 
 def test_model_palette_allows_custom_model_when_discovery_fails(
@@ -743,7 +834,8 @@ def test_effort_picker_scopes_choices_to_codex(tmp_path: Path) -> None:
     assert "minimal" in labels
     assert "xhigh / extra high" in labels
     assert "max" not in labels
-    assert footer == "current: provider default"
+    assert "source: built-in defaults; Codex models cache:" in footer
+    assert footer.endswith("current: provider default")
 
 
 def test_effort_picker_allows_claude_max(tmp_path: Path) -> None:
@@ -802,6 +894,64 @@ def test_model_command_allows_claude_max_effort(tmp_path: Path, monkeypatch) -> 
     assert selected.backend == "claude"
     assert selected.model == "sonnet"
     assert selected.effort == "max"
+
+
+def test_model_command_rejects_effort_not_supported_by_selected_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import EffortCatalog
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_efforts",
+        lambda provider, *, model=None, binary=None: EffortCatalog(("high",), "Codex models cache"),
+    )
+    renderer = ScriptedRenderer([])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+    )
+
+    selected = repl._handle_model_command(session, "codex gpt-high-only xhigh", renderer)
+
+    assert selected is session
+    assert renderer.errors == ["  ! effort for gpt-high-only must be one of: high"]
+
+
+def test_effort_command_rejects_effort_not_supported_by_current_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from self_harness.cli_agent import repl
+    from self_harness.cli_agent.model_discovery import EffortCatalog
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setattr(
+        repl,
+        "discover_provider_efforts",
+        lambda provider, *, model=None, binary=None: EffortCatalog(("low",), "Codex models cache"),
+    )
+    renderer = ScriptedRenderer([])
+    session = HeadlessCliSession(
+        backend="codex",
+        binary="codex",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        model="gpt-low-only",
+    )
+
+    selected = repl._handle_effort_command(session, "high", renderer)
+
+    assert selected is session
+    assert session.effort is None
+    assert renderer.errors == ["  ! effort for gpt-low-only must be one of: low"]
 
 
 def test_code_startup_ignores_stale_codex_max_effort(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
@@ -918,6 +1068,61 @@ def test_provider_model_discovery_reads_codex_cache(tmp_path: Path) -> None:
     assert catalog.models == ("gpt-codex-live", "gpt-codex-mini")
     assert catalog.source == "Codex models cache"
     assert catalog.error is None
+
+
+def test_provider_effort_discovery_reads_codex_cache(tmp_path: Path) -> None:
+    from self_harness.cli_agent.model_discovery import discover_provider_efforts
+
+    (tmp_path / "models_cache.json").write_text(
+        json.dumps(
+            {
+                "models": [
+                    {
+                        "slug": "gpt-high-only",
+                        "supported_reasoning_levels": [
+                            {"effort": "low"},
+                            {"effort": "high"},
+                        ],
+                    },
+                    {
+                        "slug": "gpt-no-reasoning",
+                        "supported_reasoning_levels": [],
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    catalog = discover_provider_efforts("codex", model="gpt-high-only", env={"CODEX_HOME": str(tmp_path)})
+    unsupported = discover_provider_efforts("codex", model="gpt-no-reasoning", env={"CODEX_HOME": str(tmp_path)})
+
+    assert catalog.efforts == ("low", "high")
+    assert catalog.source == "Codex models cache"
+    assert catalog.error is None
+    assert unsupported.efforts == ()
+    assert unsupported.fallback_allowed is False
+
+
+def test_provider_effort_discovery_reads_claude_help(tmp_path: Path) -> None:
+    from self_harness.cli_agent.model_discovery import discover_provider_efforts
+
+    fake = tmp_path / "claude"
+    fake.write_text(
+        """#!/bin/sh
+cat <<'EOF'
+Usage: claude [options]
+  --effort <level>  Effort level for the current session (low, medium, high, xhigh, max)
+EOF
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+
+    catalog = discover_provider_efforts("claude", binary=str(fake), env={})
+
+    assert catalog.efforts == ("low", "medium", "high", "xhigh", "max")
+    assert catalog.source == f"{fake} --help"
 
 
 def test_repl_command_palette_can_exit(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]

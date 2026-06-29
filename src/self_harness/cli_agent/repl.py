@@ -22,11 +22,17 @@ from self_harness.cli_agent.effort import (
     EFFORT_ALIASES,
     effort_help,
     normalize_effort,
+    resolve_supported_efforts,
     supported_efforts,
     valid_effort_or_none,
     validate_effort_for_provider,
 )
-from self_harness.cli_agent.model_discovery import ModelCatalog, discover_provider_models
+from self_harness.cli_agent.model_discovery import (
+    EffortCatalog,
+    ModelCatalog,
+    discover_provider_efforts,
+    discover_provider_models,
+)
 from self_harness.cli_agent.session import HeadlessCliSession, InteractiveSession, headless_binary_for_backend
 from self_harness.cli_agent.sessions import SessionRecord, list_sessions, load_session, save_session
 from self_harness.cli_agent.ui import BackRequested, ConsoleRenderer
@@ -616,9 +622,10 @@ def _handle_provider_command(session: CodeSession, raw: str, renderer: ConsoleRe
 
 def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRenderer) -> CodeSession:
     provider = _provider(session)
+    model = _session_model(session, provider)
     if not raw:
         try:
-            picked = _effort_picker(session, renderer, provider=provider)
+            picked = _effort_picker(session, renderer, provider=provider, model=model)
         except BackRequested:
             return session
         if picked is None:
@@ -634,6 +641,7 @@ def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRend
         return session
     try:
         effort = validate_effort_for_provider(provider, effort)
+        _validate_effort_for_model(provider, model, effort)
     except ValueError as exc:
         renderer.error(f"  ! {exc}")
         return session
@@ -641,8 +649,12 @@ def _handle_effort_command(session: CodeSession, raw: str, renderer: ConsoleRend
     if isinstance(session, HeadlessCliSession):
         session.effort = effort
         selected = session
+    elif isinstance(session, InteractiveSession):
+        session.effort = effort
+        session._transport = None
+        selected = session
     else:
-        renderer.error(f"  ! {provider} does not support reasoning effort; switch to Codex or Claude first.")
+        renderer.error(f"  ! {provider} does not support reasoning effort; switch to GLM, Codex, or Claude first.")
         selected = session
         renderer.info(_model_status(selected))
         return selected
@@ -698,11 +710,18 @@ def _model_palette_for_provider(
         if model_cancelled:
             return session
         model = selected_model
-        current_effort = valid_effort_or_none(provider, getattr(session, "effort", None))
+        model_for_effort = model or _default_model_for_provider(provider)
+        current_effort = _valid_effort_for_model_or_none(provider, model_for_effort, getattr(session, "effort", None))
         effort = current_effort
-        if provider in {"codex", "claude"}:
+        if provider in {"glm", "codex", "claude"}:
             try:
-                selected_effort = _effort_picker(session, renderer, current=current_effort, provider=provider)
+                selected_effort = _effort_picker(
+                    session,
+                    renderer,
+                    current=current_effort,
+                    provider=provider,
+                    model=model_for_effort,
+                )
             except BackRequested:
                 continue
             effort = selected_effort if selected_effort is not None else current_effort
@@ -784,13 +803,25 @@ def _effort_picker(
     *,
     current: str | None = None,
     provider: str | None = None,
+    model: str | None = None,
 ) -> str | None:
     selected_provider = provider or _provider(session)
-    supported = supported_efforts(selected_provider)
+    selected_model = model or _session_model(session, selected_provider)
+    catalog = _effort_catalog(selected_provider, selected_model)
+    supported = resolve_supported_efforts(
+        selected_provider,
+        discovered_efforts=catalog.efforts,
+        fallback_allowed=catalog.fallback_allowed,
+    )
     if not supported:
-        renderer.error(f"  ! {selected_provider} does not support reasoning effort")
+        detail = f": {catalog.error}" if catalog.error else ""
+        renderer.error(
+            f"  ! {selected_provider} does not support reasoning effort for "
+            f"{selected_model or 'provider default'}{detail}"
+        )
         return None
-    current_effort = valid_effort_or_none(selected_provider, current or getattr(session, "effort", None))
+    candidate_effort = current or getattr(session, "effort", None)
+    current_effort = candidate_effort if isinstance(candidate_effort, str) and candidate_effort in supported else None
     options = [(str(index), _effort_label(value)) for index, value in enumerate(supported, start=1)]
     options.append(("0", "provider default / unchanged"))
     mapping: dict[str, str | None] = {str(index): value for index, value in enumerate(supported, start=1)}
@@ -798,7 +829,7 @@ def _effort_picker(
     renderer.menu(
         f"{selected_provider.upper()} Reasoning Effort",
         options,
-        footer=f"current: {current_effort or 'provider default'}",
+        footer=_effort_picker_footer(catalog, current_effort=current_effort),
     )
     choice = renderer.ask("effort").strip().lower()
     if choice in mapping:
@@ -808,7 +839,12 @@ def _effort_picker(
         renderer.error(f"  ! effort must be one of: {effort_help(selected_provider)}")
         return None
     try:
-        return validate_effort_for_provider(selected_provider, effort)
+        effort = validate_effort_for_provider(selected_provider, effort)
+        if effort not in supported:
+            raise ValueError(
+                f"effort for {selected_model or selected_provider} must be one of: {', '.join(supported)}"
+            )
+        return effort
     except ValueError as exc:
         renderer.error(f"  ! {exc}")
         return None
@@ -867,6 +903,7 @@ def _switch_code_backend(
 ) -> CodeSession:
     try:
         effort = validate_effort_for_provider(provider, effort)
+        _validate_effort_for_model(provider, model or _default_model_for_provider(provider), effort)
     except ValueError as exc:
         renderer.error(f"  ! {exc}")
         return session
@@ -884,6 +921,7 @@ def _switch_code_backend(
             harvester=session.harvester,
             ux_harvester=_ux_harvester(session),
             model=model or DEFAULT_GLM_MODEL,
+            effort=effort,
             max_steps=session.max_steps,
             tool_timeout_seconds=session.tool_timeout_seconds,
             evolving=session.evolving,
@@ -931,7 +969,7 @@ def _persist_code_selection(
     selected_effort = effort or getattr(session, "effort", None)
     if isinstance(selected_effort, str) and selected_effort:
         cfg.set("code_effort", selected_effort)
-    elif provider in {"codex", "claude"}:
+    elif provider in {"glm", "codex", "claude"}:
         cfg.unset("code_effort")
     # Keep the legacy startup path readable for older installs and `settings get model`.
     cfg.set("model", provider if provider != "glm" else (model or DEFAULT_GLM_MODEL))
@@ -942,7 +980,7 @@ def _model_status(session: CodeSession) -> str:
     provider = _provider(session)
     model = getattr(session, "model", None) or ("provider default" if provider != "glm" else DEFAULT_GLM_MODEL)
     raw_effort = getattr(session, "effort", None)
-    valid_effort = valid_effort_or_none(provider, raw_effort)
+    valid_effort = _valid_effort_for_model_or_none(provider, model if isinstance(model, str) else None, raw_effort)
     if raw_effort and valid_effort is None:
         effort = f"provider default (ignored invalid: {raw_effort})"
     else:
@@ -961,6 +999,61 @@ def _identity_text(session: CodeSession) -> str:
         binary = getattr(session, "binary", None) or provider
         transport = f"{provider} headless CLI ({binary})"
     return f"SelfHarness Code is using {_model_status(session)}\ntransport: {transport}"
+
+
+def _session_model(session: CodeSession, provider: str) -> str | None:
+    model = getattr(session, "model", None) if _provider(session) == provider else None
+    if isinstance(model, str) and model:
+        return model
+    return _default_model_for_provider(provider)
+
+
+def _default_model_for_provider(provider: str) -> str | None:
+    if provider == "glm":
+        return DEFAULT_GLM_MODEL
+    return None
+
+
+def _effort_catalog(provider: str, model: str | None) -> EffortCatalog:
+    binary = headless_binary_for_backend(provider) if provider in {"codex", "agy", "claude"} else None
+    return discover_provider_efforts(provider, model=model, binary=binary)
+
+
+def _effort_picker_footer(catalog: EffortCatalog, *, current_effort: str | None) -> str:
+    source = catalog.source
+    if not catalog.efforts and catalog.fallback_allowed:
+        source = f"built-in defaults; {catalog.source}: {catalog.error or 'no effort metadata'}"
+    return f"source: {source}; current: {current_effort or 'provider default'}"
+
+
+def _validate_effort_for_model(provider: str, model: str | None, effort: str | None) -> None:
+    if effort is None:
+        return
+    catalog = _effort_catalog(provider, model)
+    supported = resolve_supported_efforts(
+        provider,
+        discovered_efforts=catalog.efforts,
+        fallback_allowed=catalog.fallback_allowed,
+    )
+    if supported and effort not in supported:
+        target = model or provider
+        raise ValueError(f"effort for {target} must be one of: {', '.join(supported)}")
+    if not supported and not catalog.fallback_allowed:
+        target = model or provider
+        raise ValueError(f"{target} does not support reasoning effort")
+
+
+def _valid_effort_for_model_or_none(provider: str, model: str | None, effort: object) -> str | None:
+    if not isinstance(effort, str) or not effort:
+        return None
+    valid = valid_effort_or_none(provider, effort)
+    if valid is None:
+        return None
+    try:
+        _validate_effort_for_model(provider, model, valid)
+    except ValueError:
+        return None
+    return valid
 
 
 def _provider(session: CodeSession) -> str:

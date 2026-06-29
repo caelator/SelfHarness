@@ -84,6 +84,7 @@ class InteractiveSession:
     harvester: FailureHarvester
     ux_harvester: UxFailureHarvester | None = None
     model: str = DEFAULT_GLM_MODEL
+    effort: str | None = None
     max_steps: int = DEFAULT_MAX_STEPS
     tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
     evolving: bool = False
@@ -94,7 +95,7 @@ class InteractiveSession:
     def _get_transport(self) -> MessagesTransport:
         if self._transport is None:
             self._transport = AnthropicAgentTransport(
-                base_url=self.base_url, api_key=self.api_key, model=self.model
+                base_url=self.base_url, api_key=self.api_key, model=self.model, effort=self.effort
             )
         return self._transport
 
@@ -108,6 +109,7 @@ class InteractiveSession:
             base_url=self.base_url,
             api_key=self.api_key,
             model=self.model,
+            effort=self.effort,
             on_text_delta=on_text_delta,
             on_tool_start=on_tool_start,
         )
@@ -173,7 +175,7 @@ class InteractiveSession:
 
         loop = run_agent_loop(
             transport=transport,
-            system_prompt=_interactive_system_prompt(self.harness, self.model),
+            system_prompt=_interactive_system_prompt(self.harness, self.model, self.effort),
             task_prompt=user_text,
             workdir=self.workdir,
             env=dict(os.environ),
@@ -453,10 +455,10 @@ def _headless_effort_override(backend: str) -> str | None:
     return os.environ.get("SELF_HARNESS_HEADLESS_EFFORT")
 
 
-def _interactive_system_prompt(harness: HarnessSpec, model: str) -> str:
+def _interactive_system_prompt(harness: HarnessSpec, model: str, effort: str | None) -> str:
     return "\n\n".join(
         [
-            _runtime_identity_instructions(provider="glm", model=model),
+            _runtime_identity_instructions(provider="glm", model=model, effort=effort),
             render_system_prompt(harness),
         ]
     )

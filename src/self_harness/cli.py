@@ -1945,7 +1945,7 @@ def _run_code(
     raw_effort = user_config.resolve_code_effort(provider=provider, config=cfg)
     effort_warning = None
     effort = None
-    if provider in {"codex", "claude"} and raw_effort:
+    if provider in {"glm", "codex", "claude"} and raw_effort:
         effort = normalize_effort(raw_effort)
         try:
             if effort is None:
@@ -1981,7 +1981,9 @@ def _run_code(
             f"({model_binary}), model: {model_text}, effort: {effort_text}"
         )
     else:
-        print(f"main coding backend: GLM via Z.ai ({model or user_config.DEFAULT_MODEL})")
+        model_text = model or user_config.DEFAULT_MODEL
+        effort_text = effort or "provider default"
+        print(f"main coding backend: GLM via Z.ai ({model_text}), effort: {effort_text}")
     print()
 
     # Resolve a session to resume (explicit id, or most recent), or mint a fresh one.
@@ -2032,6 +2034,7 @@ def _run_code(
             harvester=harvester,
             ux_harvester=ux_harvester,
             model=model or user_config.DEFAULT_MODEL,
+            effort=effort,
             max_steps=max_steps,
             tool_timeout_seconds=tool_timeout_seconds,
             evolving=evolving,

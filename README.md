@@ -710,9 +710,14 @@ and related provider/backend variants are answered locally by the control plane
 so the reported model comes from SelfHarness configuration, not model
 self-description.
 
-Reasoning effort is provider-scoped. Codex supports `none`, `minimal`, `low`,
-`medium`, `high`, and `xhigh`; Claude supports `low`, `medium`, `high`,
-`xhigh`, and `max`. GLM/Z.ai and Agy do not expose effort controls here.
+Reasoning effort is model-aware where the provider exposes capability metadata.
+Codex reads each selected model's `supported_reasoning_levels` from the Codex
+model cache; Claude parses the local CLI's advertised `--effort` choices; and
+GLM/Z.ai confirms the selected model through Z.ai's live `/models` endpoint
+before offering GLM-5.2+ effort levels. If a provider cannot report effort
+metadata, the picker falls back to safe built-in defaults and says which source
+it used. Agy exposes effort as part of the model choice text rather than a
+separate effort flag.
 
 Provider defaults can also be set before launch:
 

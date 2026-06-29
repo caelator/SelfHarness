@@ -13,6 +13,7 @@ from self_harness.types import stable_json_dumps
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MAX_TOKENS = 4096
 DEFAULT_TIMEOUT_SECONDS = 120.0
+_ANTHROPIC_OUTPUT_CONFIG_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class AnthropicAgentTransport(MessagesTransport):
         base_url: str,
         api_key: str,
         model: str,
+        effort: str | None = None,
         anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
@@ -81,6 +83,7 @@ class AnthropicAgentTransport(MessagesTransport):
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
+        self.effort = effort
         self.anthropic_version = anthropic_version
         self.timeout_seconds = timeout_seconds
 
@@ -92,7 +95,7 @@ class AnthropicAgentTransport(MessagesTransport):
         tools: Sequence[Mapping[str, Any]],
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> MessagesTurn:
-        payload = _build_payload(self.model, system, messages, tools, max_tokens)
+        payload = _build_payload(self.model, system, messages, tools, max_tokens, effort=self.effort)
         request = urllib.request.Request(
             _messages_url(self.base_url),
             data=(stable_json_dumps(payload) + "\n").encode("utf-8"),
@@ -133,6 +136,7 @@ class StreamingAnthropicAgentTransport(MessagesTransport):
         base_url: str,
         api_key: str,
         model: str,
+        effort: str | None = None,
         anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         on_text_delta: Callable[[str], None] | None = None,
@@ -147,6 +151,7 @@ class StreamingAnthropicAgentTransport(MessagesTransport):
         self.base_url = base_url
         self.api_key = api_key
         self.model = model
+        self.effort = effort
         self.anthropic_version = anthropic_version
         self.timeout_seconds = timeout_seconds
         self.on_text_delta = on_text_delta
@@ -160,7 +165,7 @@ class StreamingAnthropicAgentTransport(MessagesTransport):
         tools: Sequence[Mapping[str, Any]],
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> MessagesTurn:
-        payload = _build_payload(self.model, system, messages, tools, max_tokens)
+        payload = _build_payload(self.model, system, messages, tools, max_tokens, effort=self.effort)
         payload["stream"] = True
         headers = _anthropic_headers(self.api_key, self.anthropic_version)
         headers["Accept"] = "text/event-stream"
@@ -213,6 +218,8 @@ def _build_payload(
     messages: Sequence[Mapping[str, Any]],
     tools: Sequence[Mapping[str, Any]],
     max_tokens: int,
+    *,
+    effort: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
@@ -223,6 +230,11 @@ def _build_payload(
         payload["system"] = system
     if tools:
         payload["tools"] = [dict(tool) for tool in tools]
+    if effort:
+        payload["thinking"] = {"type": "enabled"}
+        payload["reasoning_effort"] = effort
+        if effort in _ANTHROPIC_OUTPUT_CONFIG_EFFORTS:
+            payload["output_config"] = {"effort": effort}
     return payload
 
 

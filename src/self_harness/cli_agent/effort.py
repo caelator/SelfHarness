@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 EFFORT_ALIASES = {
     "none": "none",
     "minimal": "minimal",
@@ -20,6 +22,7 @@ EFFORT_ALIASES = {
 
 SUPPORTED_EFFORTS_BY_PROVIDER = {
     "codex": ("none", "minimal", "low", "medium", "high", "xhigh"),
+    "glm": ("none", "minimal", "low", "medium", "high", "xhigh", "max"),
     "claude": ("low", "medium", "high", "xhigh", "max"),
 }
 
@@ -31,6 +34,23 @@ def normalize_effort(value: str) -> str | None:
 
 def supported_efforts(provider: str) -> tuple[str, ...]:
     return SUPPORTED_EFFORTS_BY_PROVIDER.get(provider, ())
+
+
+def resolve_supported_efforts(
+    provider: str,
+    *,
+    discovered_efforts: Sequence[str] | None = None,
+    fallback_allowed: bool = True,
+) -> tuple[str, ...]:
+    baseline = supported_efforts(provider)
+    if discovered_efforts:
+        discovered = _dedupe_efforts(discovered_efforts)
+        if baseline:
+            return tuple(effort for effort in discovered if effort in baseline)
+        return discovered
+    if fallback_allowed:
+        return baseline
+    return ()
 
 
 def effort_help(provider: str) -> str:
@@ -56,3 +76,15 @@ def valid_effort_or_none(provider: str, effort: str | None) -> str | None:
         return validate_effort_for_provider(provider, effort)
     except ValueError:
         return None
+
+
+def _dedupe_efforts(values: Sequence[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        effort = normalize_effort(value)
+        if effort is None or effort in seen:
+            continue
+        seen.add(effort)
+        out.append(effort)
+    return tuple(out)

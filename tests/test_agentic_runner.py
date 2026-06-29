@@ -211,7 +211,7 @@ def _messages_server(captured: dict[str, Any]):
 def test_agent_transport_passes_tools_and_preserves_tool_use() -> None:
     captured: dict[str, Any] = {}
     with _messages_server(captured) as base_url:
-        transport = AnthropicAgentTransport(base_url=base_url, api_key="secret", model="glm-5.2")
+        transport = AnthropicAgentTransport(base_url=base_url, api_key="secret", model="glm-5.2", effort="xhigh")
         tools = tool_schemas()
         turn = transport.create_message(
             system="be an agent",
@@ -223,11 +223,30 @@ def test_agent_transport_passes_tools_and_preserves_tool_use() -> None:
     # tools were forwarded; auth header present; endpoint hit /v1/messages
     assert [t["name"] for t in captured["request"]["tools"]] == ["bash", "read_file", "write_file"]
     assert captured["request"]["system"] == "be an agent"
+    assert captured["request"]["reasoning_effort"] == "xhigh"
+    assert captured["request"]["thinking"] == {"type": "enabled"}
+    assert captured["request"]["output_config"] == {"effort": "xhigh"}
     assert captured["x_api_key"] == "secret"
     # response preserved the tool_use block and stop_reason
     assert turn.stop_reason == "tool_use"
     assert turn.tool_uses()[0]["name"] == "bash"
     assert turn.usage == {"input_tokens": 9, "output_tokens": 5, "total_tokens": 14}
+
+
+def test_agent_transport_minimal_effort_uses_zai_reasoning_effort() -> None:
+    captured: dict[str, Any] = {}
+    with _messages_server(captured) as base_url:
+        transport = AnthropicAgentTransport(base_url=base_url, api_key="secret", model="glm-5.2", effort="minimal")
+        transport.create_message(
+            system="be an agent",
+            messages=[{"role": "user", "content": "list files"}],
+            tools=[],
+            max_tokens=512,
+        )
+
+    assert captured["request"]["reasoning_effort"] == "minimal"
+    assert captured["request"]["thinking"] == {"type": "enabled"}
+    assert "output_config" not in captured["request"]
 
 
 # --- render_system_prompt ----------------------------------------------------
