@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from self_harness.task_sources import UX_BUNDLE_KIND, UX_COMPLAINT_FAILURE_MODE
 from self_harness.ui import HarnessUiApp
 
 
@@ -230,6 +231,48 @@ def test_ui_submit_inbox_rejects_malformed_bundle(tmp_path: Path) -> None:
     app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
     with pytest.raises(ValueError):
         app.submit_inbox_bundle({"command": "no id"})
+
+
+def test_ui_drain_dispatches_admitted_ux_bundle_through_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    monkeypatch.setattr(app, "_verify_ux_task", lambda task: True)
+    res = app.submit_inbox_bundle(
+        {
+            "id": "ux-identity",
+            "kind": UX_BUNDLE_KIND,
+            "trigger": "provider-identity-contradiction",
+            "observation": "GLM answered that it was Claude.",
+            "checkable_criterion": "The CLI reports provider glm from runtime state.",
+            "operating_provider": "glm",
+            "admitting_judge": "codex",
+            "admission_reason": "checkable identity contradiction",
+        }
+    )
+
+    assert res["ok"] is True
+    assert app._drain_inbox() == 1
+    learned = app._load_learned_tasks()
+    assert learned[0]["id"] == "ux-identity"
+    assert learned[0]["failure_mode"] == UX_COMPLAINT_FAILURE_MODE
+    assert learned[0]["metadata"]["admitting_judge"] == "codex"
+
+
+def test_ui_drain_rejects_ux_bundle_when_guard_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = HarnessUiApp(root=tmp_path, runs_dir=Path("runs"))
+    monkeypatch.setattr(app, "_verify_ux_task", lambda task: False)
+    app.submit_inbox_bundle(
+        {
+            "id": "ux-vague",
+            "kind": UX_BUNDLE_KIND,
+            "trigger": "bad",
+            "observation": "It behaved strangely.",
+            "checkable_criterion": "A concrete output condition is satisfied.",
+        }
+    )
+
+    assert app._drain_inbox() == 0
+    assert app._load_learned_tasks() == []
+    assert list(app.inbox_processed_dir.glob("*.rejected"))
 
 
 def test_ui_assembled_corpus_has_base_held_out_plus_learned_held_in(tmp_path: Path) -> None:

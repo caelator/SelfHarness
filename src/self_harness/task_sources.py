@@ -30,6 +30,8 @@ from self_harness.llm_proposer import _extract_json_object
 LEARNED_SPLIT = "held_in"
 INGESTED_FAILURE_MODE = "ingested_failure"
 GENERATED_FAILURE_MODE = "generated_task"
+UX_COMPLAINT_FAILURE_MODE = "ux_complaint"
+UX_BUNDLE_KIND = "ux_complaint"
 
 _DISALLOWED_METADATA = load_agentic_metadata_keys()
 
@@ -134,6 +136,72 @@ def ingest_failing_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
         workspace_files=workspace_files,
         failure_mode=INGESTED_FAILURE_MODE,
     )
+
+
+def ingest_ux_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert an admitted semantic/UX complaint bundle into a held-in task.
+
+    Bundle shape:
+    ``{id, kind:"ux_complaint", trigger, observation, checkable_criterion, files?, metadata?}``.
+    Unlike command bundles, UX bundles are not self-validating. They must already carry a concrete
+    criterion admitted by a secondary judge; vague complaints are rejected before they can enter the
+    learned held-in set.
+    """
+
+    if not isinstance(bundle, Mapping):
+        raise TaskSourceError("bundle must be an object")
+    kind = bundle.get("kind", UX_BUNDLE_KIND)
+    if kind != UX_BUNDLE_KIND:
+        raise TaskSourceError(f"unsupported ux bundle kind: {kind!r}")
+    task_id = _require_str(bundle.get("id"), "id")
+    trigger = _require_str(bundle.get("trigger"), "trigger")
+    observation = _require_str(bundle.get("observation"), "observation")
+    criterion = _require_str(bundle.get("checkable_criterion"), "checkable_criterion")
+    files = bundle.get("files")
+    workspace_files = _validate_workspace_files(files) if files is not None else None
+    expected = bundle.get("expected_behavior")
+    observed = bundle.get("observed")
+    description = bundle.get("description")
+    metadata = bundle.get("metadata")
+    extra_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    for key in ("operating_provider", "admitting_judge", "admission_reason", "trigger_kind"):
+        value = bundle.get(key)
+        if isinstance(value, str) and value.strip():
+            extra_metadata.setdefault(key, value.strip())
+    extra_metadata.setdefault("trigger", trigger)
+    parts = [
+        "A SelfHarness operator or automatic detector observed a semantic/control-plane UX failure.",
+        f"Trigger: {trigger}",
+        f"Observation: {observation}",
+    ]
+    if isinstance(observed, str) and observed.strip():
+        parts.append(f"Observed output: {observed.strip()}")
+    if isinstance(expected, str) and expected.strip():
+        parts.append(f"Expected behavior: {expected.strip()}")
+    parts.append("Make the smallest correct harness or CLI change so this scenario behaves as expected.")
+    return make_task(
+        task_id=task_id,
+        instructions="\n".join(parts),
+        success_criteria=criterion,
+        description=description if isinstance(description, str) else f"Fix UX complaint: {trigger}",
+        workspace_files=workspace_files,
+        failure_mode=UX_COMPLAINT_FAILURE_MODE,
+        extra_metadata=extra_metadata,
+    )
+
+
+def ingest_inbox_bundle(bundle: Mapping[str, Any]) -> dict[str, Any]:
+    """Dispatch an inbox bundle to the correct held-in task ingester.
+
+    Legacy command bundles omitted ``kind``; keep treating those as failing-command bundles.
+    """
+
+    kind = bundle.get("kind", "failing_command")
+    if kind in {"failing_command", "command", None}:
+        return ingest_failing_bundle(bundle)
+    if kind == UX_BUNDLE_KIND:
+        return ingest_ux_bundle(bundle)
+    raise TaskSourceError(f"unsupported inbox bundle kind: {kind!r}")
 
 
 def dedupe_tasks(tasks: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:

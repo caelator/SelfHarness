@@ -404,6 +404,121 @@ def test_repl_identity_question_is_answered_locally(tmp_path: Path, monkeypatch,
     assert "glm ›" not in out
 
 
+class StubJudgeProvider:
+    def __init__(self, provider_id: str, admitted: bool, criterion: str | None, reason: str) -> None:
+        self.provider_id = provider_id
+        self.admitted = admitted
+        self.criterion = criterion
+        self.reason = reason
+
+    def admit(self, candidate: object):
+        from self_harness.cli_agent.ux_harvest import AdmissionResult
+
+        del candidate
+        return AdmissionResult(self.admitted, self.provider_id, self.criterion, self.reason)
+
+
+def _ux_harvester_for_test(tmp_path: Path, provider: StubJudgeProvider):
+    from self_harness.cli_agent.ux_harvest import JudgeProviderRegistry, SecondaryModelJudge, UxFailureHarvester
+
+    return UxFailureHarvester(
+        inbox_dir=tmp_path / "inbox",
+        workdir=tmp_path,
+        judge=SecondaryModelJudge(registry=JudgeProviderRegistry(providers=[provider])),
+    )
+
+
+def test_repl_report_command_admits_ux_bundle(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    lines = iter(["/report model identity contradicted runtime state", "/harvested", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = InteractiveSession(
+        api_key="k",
+        base_url="https://api.z.ai/api/anthropic",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        ux_harvester=_ux_harvester_for_test(
+            tmp_path,
+            StubJudgeProvider("codex", True, "The identity answer uses SelfHarness runtime state.", "valid"),
+        ),
+        model="glm-5.2",
+    )
+
+    assert run_repl(session, banner=False, root=None, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "semantic issue candidate admitted" in out
+    assert "ux: 1" in out
+    bundle = json.loads(next((tmp_path / "inbox").glob("*ux*.json")).read_text(encoding="utf-8"))
+    assert bundle["kind"] == "ux_complaint"
+    assert bundle["admitting_judge"] == "codex"
+
+
+def test_repl_report_command_shows_rejected_ux_bundle(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    lines = iter(["/report vague badness", "/rejected", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = InteractiveSession(
+        api_key="k",
+        base_url="https://api.z.ai/api/anthropic",
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        ux_harvester=_ux_harvester_for_test(
+            tmp_path,
+            StubJudgeProvider("codex", False, None, "not checkable"),
+        ),
+        model="glm-5.2",
+    )
+
+    assert run_repl(session, banner=False, root=None, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "semantic issue candidate rejected" in out
+    assert "not checkable" in out
+    assert list((tmp_path / "inbox" / "processed").glob("*.rejected"))
+
+
+def test_repl_auto_harvests_identity_contradiction(tmp_path: Path, monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    fake = tmp_path / "codex"
+    fake.write_text(
+        """#!/bin/sh
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--output-last-message" ]; then
+    shift
+    out="$1"
+  fi
+  shift || true
+done
+cat > prompt.txt
+printf '%s' "I'm Claude, made by Anthropic." > "$out"
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    lines = iter(["please describe your runtime identity", "/harvested", "/exit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(lines))
+    session = HeadlessCliSession(
+        backend="codex",
+        binary=str(fake),
+        workdir=tmp_path,
+        harness=initial_harness(),
+        harvester=FailureHarvester(inbox_dir=tmp_path / "inbox", workdir=tmp_path),
+        ux_harvester=_ux_harvester_for_test(
+            tmp_path,
+            StubJudgeProvider("glm", True, "Identity answers use runtime state.", "identity mismatch"),
+        ),
+    )
+
+    assert run_repl(session, banner=False, root=None, plain=True) == 0
+
+    out = capsys.readouterr().out
+    assert "semantic issue candidate admitted" in out
+    assert "ux: 1" in out
+    bundle = json.loads(next((tmp_path / "inbox").glob("*ux*.json")).read_text(encoding="utf-8"))
+    assert bundle["trigger"] == "provider-identity-contradiction"
+
+
 def test_model_status_ignores_stale_invalid_effort(tmp_path: Path) -> None:
     from self_harness.cli_agent import repl
 

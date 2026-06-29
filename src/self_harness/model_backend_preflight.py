@@ -288,6 +288,14 @@ def build_zai_transport(*, base_url: str, api_key: str | None) -> ChatCompletion
     return UrlLibChatCompletionTransport(base_url=base_url, api_key=api_key)
 
 
+def build_minimax_transport(*, base_url: str, api_key: str | None) -> ChatCompletionTransport:
+    if not api_key:
+        raise LLMClientError("MiniMax endpoint requires an API key (MINIMAX_API_KEY)")
+    return UrlLibChatCompletionTransport(base_url=base_url, api_key=api_key)
+
+
+def build_qwen_transport(*, base_url: str, api_key: str | None = None) -> ChatCompletionTransport:
+    return UrlLibChatCompletionTransport(base_url=base_url, api_key=api_key)
 
 
 def evaluate_model_backend_preflight(

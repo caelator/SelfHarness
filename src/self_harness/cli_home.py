@@ -65,12 +65,15 @@ Code — the interactive coding agent
     • /threads             list, create, and switch conversation threads.
     • /config              edit runtime options such as max steps, timeout, and harvesting.
     • /status, /history    inspect the active thread and recent turns.
+    • /report, /feedback   capture semantic/control-plane UX issues for secondary judging.
+    • /harvested, /rejected inspect admitted and rejected harvest bundles.
     • /exit, /quit, /q     leave. Ctrl-C exits at the prompt; during a turn it interrupts.
 
   Auto-run: commands execute directly on your machine (no sandbox). Use it on code you trust.
-  Flywheel: failing tests/builds it hits are harvested so the Loop can learn from them. By default
-  `code` shares ONE central harness + failure inbox (under ~/Documents/SelfHarness/runs) across every
-  project, so the loop learns from your real sessions; pass --local-harness for a per-project one.
+  Flywheel: failing tests/builds and admitted semantic UX failures are harvested so the Loop can
+  learn from them. By default `code` shares ONE central harness + failure inbox (under
+  ~/Documents/SelfHarness/runs) across every project, so the loop learns from your real sessions;
+  pass --local-harness for a per-project one.
   Long tasks: if the agent reaches its per-turn step budget it auto-continues a few times instead of
   stopping; type a new instruction any time to redirect.
 """,
@@ -121,9 +124,11 @@ API key — connecting to GLM 5.2
 """,
     "flywheel": """\
 The flywheel — why this gets better the more you use it
-  1. You code with `self-harness code`. When GLM hits a failing test/build, that failure is
-     captured into a shared inbox (runs/inbox/).
-  2. The Loop drains the inbox, turning real failures into practice tasks.
+  1. You code with `self-harness code`. Failing test/build commands are captured into a shared inbox
+     (runs/inbox/). Semantic UX failures can be captured with /report or automatic detectors and must
+     be admitted by a secondary non-active judge provider first.
+  2. The Loop drains the inbox, turning real failures into practice tasks. UX complaints get an
+     additional solve+verify guard before becoming learned held-in tasks.
   3. It evolves the harness to handle them — keeping only changes that measurably help.
   4. Your next coding session uses the improved harness.
   The coding agent and the loop share one harness file, so improvements flow straight back to you.

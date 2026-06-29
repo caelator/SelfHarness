@@ -463,7 +463,7 @@ class ConsoleRenderer:
     def harvest_note(self, count: int) -> None:
         if count <= 0:
             return
-        msg = f"  ⤷ harvested {count} failing command(s) into the improvement inbox"
+        msg = f"  ⤷ harvested {count} bundle(s) into the improvement inbox"
         if self.plain or self._console is None:
             print(msg + "\n")
         else:

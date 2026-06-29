@@ -8,6 +8,7 @@ harvesting (the self-improvement flywheel) are unchanged from Phase 1.
 
 from __future__ import annotations
 
+import json
 import shlex
 import uuid
 from datetime import UTC, datetime
@@ -29,6 +30,7 @@ from self_harness.cli_agent.model_discovery import ModelCatalog, discover_provid
 from self_harness.cli_agent.session import HeadlessCliSession, InteractiveSession, headless_binary_for_backend
 from self_harness.cli_agent.sessions import SessionRecord, list_sessions, load_session, save_session
 from self_harness.cli_agent.ui import BackRequested, ConsoleRenderer
+from self_harness.cli_agent.ux_harvest import UxFailureHarvester
 from self_harness.exceptions import AgenticRunnerError
 
 CodeSession = InteractiveSession | HeadlessCliSession
@@ -67,6 +69,9 @@ _SLASH_COMMANDS: tuple[tuple[str, str], ...] = (
     ("/history", "show recent turns"),
     ("/harness", "show active harness hash"),
     ("/harvested", "list harvested failure bundles"),
+    ("/report", "report a semantic/control-plane UX issue"),
+    ("/feedback", "alias for /report"),
+    ("/rejected", "list rejected semantic UX captures"),
     ("/cwd", "show working directory"),
     ("/clear", "clear the terminal"),
     ("/reset", "clear current thread history"),
@@ -90,7 +95,10 @@ Commands:
   /config      open runtime settings picker
   /history     show recent turns
   /harness     show the active harness
-  /harvested   list harvested failure bundles
+  /harvested   list harvested failure bundles and admitted UX reports
+  /report      report a semantic/control-plane UX issue for secondary judging
+  /feedback    alias for /report
+  /rejected    list rejected semantic UX captures
   /sessions    list saved sessions you can resume (alias for /threads list)
   /clear       clear the terminal
   /reset       clear the current thread history
@@ -216,12 +224,15 @@ def run_repl(
             lineage = "evolving lineage" if session.evolving else "initial_harness() (Figure 3)"
             renderer.info(f"harness {session.harness_hash} ({lineage})")
             continue
-        if line == "/harvested":
-            ids = session.harvester.written_ids
-            renderer.info(
-                f"harvested {len(ids)} failure bundle(s) this session"
-                + (": " + ", ".join(ids) if ids else "")
-            )
+        if line == "/harvested" or line == "/harvested --all":
+            _show_harvested(session, renderer)
+            continue
+        if line == "/harvested --rejected" or line == "/rejected":
+            _show_rejected(session, renderer)
+            continue
+        if line == "/report" or line.startswith("/report ") or line == "/feedback" or line.startswith("/feedback "):
+            command = line.split(maxsplit=1)[1] if " " in line else ""
+            _handle_report_command(session, record, command, renderer, root)
             continue
         if line == "/sessions":
             _list_sessions(renderer, root)
@@ -253,6 +264,7 @@ def _run_turn(
     root: Path | None,
 ) -> None:
     augmented, inlined = expand_mentions(line, session.workdir)
+    previous_assistant_text = _last_assistant_text(record)
     if inlined:
         renderer.info("  @ inlined: " + ", ".join(inlined))
 
@@ -304,8 +316,20 @@ def _run_turn(
                     "`self-harness settings set model agy`, or `self-harness settings set model claude` "
                     "to run the main coding agent through a local headless CLI."
                 )
+        ux_written, ux_rejected = _observe_ux_turn(
+            session,
+            user_text=line if attempt == 0 else message,
+            result=result,
+            previous_assistant_text=previous_assistant_text,
+        )
+        if ux_written:
+            result.harvested.extend(ux_written)
+            renderer.info(f"  semantic issue candidate admitted: {', '.join(ux_written)}")
+        if ux_rejected:
+            renderer.info(f"  semantic issue candidate rejected: {len(ux_rejected)}")
         renderer.harvest_note(len(result.harvested))
         _record_turn(record, message if attempt == 0 else "(auto-continue)", result)
+        _remember_harvested(record, result.harvested)
         record.history[:] = list(session.history)
         _save(record, root)
 
@@ -322,6 +346,99 @@ def _run_turn(
                 f"  … still working after {_MAX_AUTO_CONTINUE} auto-continues. "
                 "Say 'continue' to keep going, or give a narrower next step."
             )
+
+
+def _handle_report_command(
+    session: CodeSession,
+    record: SessionRecord,
+    raw: str,
+    renderer: ConsoleRenderer,
+    root: Path | None,
+) -> None:
+    harvester = _ux_harvester(session)
+    if harvester is None or not harvester.enabled:
+        renderer.info("semantic UX harvesting is off for this session")
+        return
+    last_assistant = _last_assistant_text(record)
+    if raw.strip():
+        trigger = "manual-report"
+        observation = raw.strip()
+        expected = ""
+        observed = last_assistant[:1000]
+        criterion = ""
+    else:
+        try:
+            observation = renderer.ask("problem").strip()
+            expected = renderer.ask("expected behavior").strip()
+            observed = renderer.ask("observed behavior", default=last_assistant[:1000]).strip()
+            criterion = renderer.ask("checkable criterion").strip()
+        except BackRequested:
+            renderer.info("report cancelled")
+            return
+        trigger = observation[:80] or "manual-report"
+    if not observation:
+        renderer.error("  ! report needs a user-visible problem")
+        return
+    harvester.report(
+        trigger=trigger,
+        observation=observation,
+        expected_behavior=expected,
+        observed=observed,
+        checkable_criterion=criterion,
+        operating_provider=_provider(session),
+        metadata={"trigger_kind": "manual-report"},
+    )
+    written, rejected = harvester.flush(id_prefix=f"report-{_now_stamp()}")
+    if written:
+        _remember_harvested(record, written)
+        _save(record, root)
+        renderer.info(f"semantic issue candidate admitted: {', '.join(written)}")
+    if rejected:
+        renderer.info(f"semantic issue candidate rejected: {', '.join(rejected)}")
+    if not written and not rejected:
+        renderer.info("no semantic issue candidate was written")
+
+
+def _observe_ux_turn(
+    session: CodeSession,
+    *,
+    user_text: str,
+    result: object,
+    previous_assistant_text: str,
+) -> tuple[list[str], list[str]]:
+    harvester = _ux_harvester(session)
+    if harvester is None:
+        return [], []
+    harvester.observe_turn(
+        user_text=user_text,
+        final_text=str(getattr(result, "final_text", "")),
+        stop_reason=str(getattr(result, "stop_reason", "")),
+        error=getattr(result, "error", None),
+        tool_activity=list(getattr(result, "tool_activity", [])),
+        operating_provider=_provider(session),
+        model_status=_model_status(session),
+        previous_assistant_text=previous_assistant_text,
+    )
+    return harvester.flush(id_prefix=f"cli-{getattr(session, 'turn_index', 0):03d}")
+
+
+def _ux_harvester(session: CodeSession) -> UxFailureHarvester | None:
+    value = getattr(session, "ux_harvester", None)
+    return value if isinstance(value, UxFailureHarvester) else None
+
+
+def _last_assistant_text(record: SessionRecord) -> str:
+    for turn in reversed(record.turns):
+        text = turn.get("final_text")
+        if isinstance(text, str) and text.strip():
+            return text
+    return ""
+
+
+def _remember_harvested(record: SessionRecord, ids: list[str]) -> None:
+    for bundle_id in ids:
+        if bundle_id not in record.harvested:
+            record.harvested.append(bundle_id)
 
 
 def _record_turn(record: SessionRecord, line: str, result: object) -> None:
@@ -410,10 +527,12 @@ def _command_palette(
             ("6", "History"),
             ("7", "Harness"),
             ("8", "Harvested failures"),
-            ("9", "Save current thread"),
-            ("10", "Clear screen"),
-            ("11", "Reset current thread"),
-            ("12", "Help"),
+            ("9", "Report UX issue"),
+            ("10", "Rejected UX captures"),
+            ("11", "Save current thread"),
+            ("12", "Clear screen"),
+            ("13", "Reset current thread"),
+            ("14", "Help"),
             ("0", "Exit SelfHarness Code"),
         ],
         footer="Type a number, or press Enter to cancel.",
@@ -441,20 +560,24 @@ def _command_palette(
         renderer.info(f"harness {session.harness_hash} ({lineage})")
     elif choice in {"8", "harvested"}:
         _show_harvested(session, renderer)
-    elif choice in {"9", "save"}:
+    elif choice in {"9", "report", "feedback"}:
+        _handle_report_command(session, record, "", renderer, root)
+    elif choice in {"10", "rejected"}:
+        _show_rejected(session, renderer)
+    elif choice in {"11", "save"}:
         record.history[:] = list(session.history)
         _save(record, root)
         renderer.info(f"saved thread {record.id}")
-    elif choice in {"10", "clear"}:
+    elif choice in {"12", "clear"}:
         renderer.clear()
-    elif choice in {"11", "reset"}:
+    elif choice in {"13", "reset"}:
         if _confirm(renderer, "Clear current thread history?"):
             session.reset()
             record.history.clear()
             record.turns.clear()
             _save(record, root)
             renderer.info("(history cleared)")
-    elif choice in {"12", "help", "?"}:
+    elif choice in {"14", "help", "?"}:
         renderer.info(_HELP)
     elif choice in {"0", "exit", "quit", "q"}:
         return session, record, True
@@ -759,6 +882,7 @@ def _switch_code_backend(
             workdir=session.workdir,
             harness=session.harness,
             harvester=session.harvester,
+            ux_harvester=_ux_harvester(session),
             model=model or DEFAULT_GLM_MODEL,
             max_steps=session.max_steps,
             tool_timeout_seconds=session.tool_timeout_seconds,
@@ -780,6 +904,7 @@ def _switch_code_backend(
         workdir=session.workdir,
         harness=session.harness,
         harvester=session.harvester,
+        ux_harvester=_ux_harvester(session),
         model=model,
         effort=effort,
         max_steps=session.max_steps,
@@ -985,7 +1110,10 @@ def _switch_thread(
         return session, record
     session.history[:] = list(target.history)
     session.turn_index = len(target.turns)
-    session.harvester.seed_written(target.harvested)
+    session.harvester.seed_written(_command_bundle_ids(target.harvested))
+    ux = _ux_harvester(session)
+    if ux is not None:
+        ux.seed_written(_ux_bundle_ids(target.harvested))
     renderer.info(f"switched to thread {target.id} ({len(target.turns)} turn(s))")
     return session, target
 
@@ -1059,6 +1187,9 @@ def _config_palette(session: CodeSession, renderer: ConsoleRenderer) -> CodeSess
             cfg.set("tool_timeout_seconds", session.tool_timeout_seconds)
         elif choice == "3":
             session.harvester.enabled = not session.harvester.enabled
+            ux = _ux_harvester(session)
+            if ux is not None:
+                ux.enabled = session.harvester.enabled
             cfg.set("harvest", session.harvester.enabled)
             renderer.info(f"harvest {'on' if session.harvester.enabled else 'off'}")
         elif choice == "4":
@@ -1082,6 +1213,13 @@ def _status_text(session: CodeSession, record: SessionRecord | None, root: Path 
     thread = record.id if record is not None else "(unsaved)"
     root_text = str(root) if root is not None else "(not persisting)"
     lineage = "evolving lineage" if session.evolving else "initial_harness()"
+    ux = _ux_harvester(session)
+    ux_text = "off"
+    if ux is not None:
+        ux_text = (
+            f"{'on' if ux.enabled else 'off'} -> {ux.inbox_dir} "
+            f"(admitted {len(ux.written_ids)}, rejected {len(ux.rejected_ids)})"
+        )
     return (
         f"{_model_status(session)}\n"
         f"thread: {thread}\n"
@@ -1089,6 +1227,7 @@ def _status_text(session: CodeSession, record: SessionRecord | None, root: Path 
         f"session store: {root_text}\n"
         f"harness: {session.harness_hash[:16]} ({lineage})\n"
         f"harvest: {'on' if session.harvester.enabled else 'off'} -> {session.harvester.inbox_dir}\n"
+        f"semantic harvest: {ux_text}\n"
         f"max steps: {session.max_steps}, tool timeout: {session.tool_timeout_seconds}s"
     )
 
@@ -1113,10 +1252,73 @@ def _show_history(record: SessionRecord, renderer: ConsoleRenderer, line: str) -
 
 
 def _show_harvested(session: CodeSession, renderer: ConsoleRenderer) -> None:
-    ids = session.harvester.written_ids
+    command_ids = session.harvester.written_ids
+    ux = _ux_harvester(session)
+    ux_ids = ux.written_ids if ux is not None else []
+    ids = _dedupe_ids([*command_ids, *ux_ids])
     renderer.info(
-        f"harvested {len(ids)} failure bundle(s) this session" + (": " + ", ".join(ids) if ids else "")
+        f"harvested {len(ids)} bundle(s) this session"
+        + (": " + ", ".join(ids) if ids else "")
+        + f"\ncommand: {len(command_ids)}, ux: {len(ux_ids)}"
     )
+
+
+def _show_rejected(session: CodeSession, renderer: ConsoleRenderer) -> None:
+    harvester = _ux_harvester(session)
+    if harvester is None:
+        renderer.info("no semantic UX harvester is attached to this session")
+        return
+    rejected = harvester.rejected_ids
+    if not rejected:
+        renderer.info("no rejected semantic UX captures this session")
+        return
+    entries = _rejected_entries(harvester)
+    if entries:
+        lines = [f"rejected {len(rejected)} semantic UX capture(s):"]
+        lines.extend(f"  {bundle_id}: {reason}" for bundle_id, reason in entries)
+        renderer.info("\n".join(lines))
+    else:
+        renderer.info(f"rejected {len(rejected)} semantic UX capture(s): " + ", ".join(rejected))
+
+
+def _rejected_entries(harvester: UxFailureHarvester) -> list[tuple[str, str]]:
+    processed = harvester.inbox_dir / "processed"
+    entries: list[tuple[str, str]] = []
+    for bundle_id in harvester.rejected_ids:
+        path = processed / f"{bundle_id}.json.rejected"
+        reason = "rejected"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            entries.append((bundle_id, reason))
+            continue
+        if isinstance(payload, dict):
+            candidate = payload.get("admission_reason")
+            if isinstance(candidate, str) and candidate.strip():
+                reason = candidate.strip()
+            metadata = payload.get("metadata")
+            if isinstance(metadata, dict):
+                judge = metadata.get("admitting_judge") or payload.get("admitting_judge")
+                if isinstance(judge, str) and judge.strip():
+                    reason = f"{reason} (judge: {judge.strip()})"
+        entries.append((bundle_id, reason))
+    return entries
+
+
+def _dedupe_ids(ids: list[str]) -> list[str]:
+    out: list[str] = []
+    for bundle_id in ids:
+        if bundle_id not in out:
+            out.append(bundle_id)
+    return out
+
+
+def _ux_bundle_ids(ids: list[str]) -> list[str]:
+    return [bundle_id for bundle_id in ids if "-ux-" in bundle_id]
+
+
+def _command_bundle_ids(ids: list[str]) -> list[str]:
+    return [bundle_id for bundle_id in ids if "-ux-" not in bundle_id]
 
 
 def _confirm(renderer: ConsoleRenderer, question: str) -> bool:
@@ -1160,11 +1362,14 @@ def _farewell(
     if root is not None:
         record.history[:] = list(session.history)
         _save(record, root)
-    ids = session.harvester.written_ids
+    ux = _ux_harvester(session)
+    ids = _dedupe_ids([*session.harvester.written_ids, *(ux.written_ids if ux is not None else [])])
     if ids:
         renderer.info(
-            f"Harvested {len(ids)} failure bundle(s) this session -> {session.harvester.inbox_dir}"
+            f"Harvested {len(ids)} bundle(s) this session -> {session.harvester.inbox_dir}"
         )
         renderer.info("Run the continuous loop (self-harness ui, Start continuous loop) to learn from them.")
+    if ux is not None and ux.rejected_ids:
+        renderer.info(f"Rejected {len(ux.rejected_ids)} semantic UX capture(s); inspect with /rejected next session.")
     if root is not None:
         renderer.info(f"Session saved as {record.id} (resume with: self-harness code --resume {record.id})")

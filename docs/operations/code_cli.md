@@ -69,6 +69,10 @@ active backend object. It does not restart the terminal.
 /whoami      show active provider, configured model, effort, and transport
 /status      show cwd, session store, thread id, harness hash, provider/model, and budgets
 /history     show recent turns
+/report      report a semantic/control-plane UX issue for secondary judging
+/feedback    alias for /report
+/harvested   list command bundles and admitted UX reports
+/rejected    list rejected UX captures and admission reasons
 /save        write the current thread now
 /clear       clear the terminal
 /reset       clear current thread history
@@ -103,3 +107,53 @@ Exit commands:
 The coding backend can execute commands on the host. Run `self-harness code` only in workspaces you
 trust. Harvesting is enabled by default; failing test/build/check commands are written to the shared
 inbox so the continuous improvement loop can learn from real failures.
+
+## Semantic UX Harvesting
+
+The command harvester remains unchanged: a failing check/build/test command becomes a legacy inbox
+bundle with the command as the success criterion.
+
+Semantic/control-plane failures use a separate `ux_complaint` bundle:
+
+```json
+{
+  "id": "report-20260629T120000Z-ux-01",
+  "kind": "ux_complaint",
+  "trigger": "provider-identity-contradiction",
+  "observation": "GLM via Z.ai answered that it was Claude.",
+  "expected_behavior": "Identity answers should come from SelfHarness runtime state.",
+  "observed": "I'm Claude, made by Anthropic.",
+  "checkable_criterion": "Asking what model is active reports provider glm from runtime state.",
+  "metadata": {
+    "operating_provider": "glm",
+    "admitting_judge": "codex",
+    "trigger_kind": "provider-identity-contradiction",
+    "admission_reason": "checkable identity contradiction"
+  }
+}
+```
+
+Manual reports:
+
+```text
+/report model identity contradicted the provider picker
+/report
+```
+
+The short form uses the supplied text as the observation. Bare `/report` opens a short structured
+flow for the problem, expected behavior, observed behavior, and optional checkable criterion.
+
+Automatic UX candidates are raised quietly for explicit user corrections, provider/model identity
+contradictions, invalid provider/model/effort state, repeated identical failing tool calls,
+apology/hedge final responses after failures, and max-step exhaustion.
+
+UX candidates are double gated:
+
+1. A randomly selected secondary judge provider, excluding the active coding provider, must return an
+   admitted verdict with a concrete `checkable_criterion`.
+2. When the continuous loop drains the inbox, the UX task must pass the existing fresh solve+verify
+   guard before it is added to learned held-in tasks.
+
+If no non-active judge is available, the judge call fails twice, the judge rejects the candidate, or
+the solve+verify guard fails, the bundle is moved to `runs/inbox/processed/*.rejected` for audit. Use
+`/rejected` or `/harvested --rejected` to inspect rejected semantic captures from the current session.

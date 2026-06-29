@@ -524,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         "--inbox-dir",
         type=Path,
         default=None,
-        help="where harvested failing commands are dropped for the loop (default: <root>/runs/inbox)",
+        help="where harvested command and UX bundles are dropped for the loop (default: <root>/runs/inbox)",
     )
     code_parser.add_argument(
         "--max-steps",
@@ -1924,6 +1924,7 @@ def _run_code(
     from self_harness.cli_agent.effort import normalize_effort, validate_effort_for_provider
     from self_harness.cli_agent.session import load_session_harness
     from self_harness.cli_agent.sessions import latest_session, load_session
+    from self_harness.cli_agent.ux_harvest import SecondaryModelJudge, UxFailureHarvester
     from self_harness.exceptions import AgenticRunnerError
     from self_harness.loop_paths import central_runs_dir
 
@@ -1999,6 +2000,12 @@ def _run_code(
 
     harness, evolving = load_session_harness(state_path)
     harvester = FailureHarvester(inbox_dir=inbox, workdir=workdir, enabled=harvest)
+    ux_harvester = UxFailureHarvester(
+        inbox_dir=inbox,
+        workdir=workdir,
+        judge=SecondaryModelJudge(),
+        enabled=harvest,
+    )
     session: HeadlessCliSession | InteractiveSession
     if headless_backend is not None:
         session = HeadlessCliSession(
@@ -2007,6 +2014,7 @@ def _run_code(
             workdir=workdir,
             harness=harness,
             harvester=harvester,
+            ux_harvester=ux_harvester,
             model=model,
             effort=effort,
             max_steps=max_steps,
@@ -2022,6 +2030,7 @@ def _run_code(
             workdir=workdir,
             harness=harness,
             harvester=harvester,
+            ux_harvester=ux_harvester,
             model=model or user_config.DEFAULT_MODEL,
             max_steps=max_steps,
             tool_timeout_seconds=tool_timeout_seconds,
@@ -2030,7 +2039,8 @@ def _run_code(
             turn_index=len(resumed.turns) if resumed is not None else 0,
         )
     if resumed is not None:
-        harvester.seed_written(resumed.harvested)
+        harvester.seed_written([bundle_id for bundle_id in resumed.harvested if "-ux-" not in bundle_id])
+        ux_harvester.seed_written([bundle_id for bundle_id in resumed.harvested if "-ux-" in bundle_id])
         print(f"resumed session {session_id} ({len(resumed.turns)} prior turn(s))")
     return run_repl(
         session,

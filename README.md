@@ -685,6 +685,10 @@ palette reaches the same controls as the slash commands:
 /whoami                       show active provider, model, effort, and transport
 /status                       show cwd, thread, harness, provider/model, harvest, budgets
 /history [n]                  show recent turns
+/report [text]                report a semantic/control-plane UX issue
+/feedback [text]              alias for /report
+/harvested                    list command bundles and admitted UX reports
+/rejected                     list rejected UX captures with admission reasons
 /save                         persist current thread immediately
 /clear                        clear the screen
 /reset                        clear current thread history
@@ -723,11 +727,20 @@ still accepted, but new installs should prefer `code_provider`, `code_model`,
 and `code_effort`.
 
 What makes it different from a static-harness CLI: it closes a **self-improvement
-flywheel**. Every failing check/build/test command GLM hits during a session is
-harvested into the shared inbox (`runs/inbox/`) as a learnable task. Run the
-continuous loop (`self-harness ui`, *Start continuous loop*) and those real
-failures become held-in tasks that evolve the harness — so the agent gets better
-*at your codebase* the more you use it. Both commands share one
+flywheel**. Failing check/build/test commands are harvested into the shared inbox
+(`runs/inbox/`) as self-validating learnable tasks. Operator-visible semantic
+failures can also be captured with `/report` or by automatic UX detectors
+(identity contradictions, invalid provider state, repeated identical failures,
+apology-after-failure turns, and max-step exhaustion). Those UX captures are
+double gated: a randomly selected secondary provider, excluding the active coding
+provider, must admit a concrete checkable criterion before the bundle enters the
+inbox, and the continuous loop must solve+verify it before it becomes a learned
+task. Rejected UX captures are preserved under `runs/inbox/processed/*.rejected`
+and are visible with `/rejected`.
+
+Run the continuous loop (`self-harness ui`, *Start continuous loop*) and those
+real failures become held-in tasks that evolve the harness — so the agent gets
+better *at your codebase* the more you use it. Both commands share one
 `runs/harness_state.json`, so improvements flow straight back into the CLI.
 
 Type `@path/to/file` in a message to inline that file's contents into the turn.

@@ -501,14 +501,16 @@ class HarnessUiApp:
         write_stable_json(self.learned_tasks_path, payload)
 
     def _drain_inbox(self) -> int:
-        """Convert each inbox failing-test bundle into a held-in task, then move it to processed/.
+        """Convert inbox bundles into held-in tasks, then move them to processed/.
 
-        Bundles are never deleted — they're moved to inbox/processed/ for an audit trail. A malformed
-        bundle is moved to processed/ with a .rejected suffix so it doesn't block the queue forever.
+        Legacy command bundles stay on the original self-validating path. UX complaint bundles must pass
+        their mandatory solve+verify guard first. Bundles are never deleted — they're moved to
+        inbox/processed/ for an audit trail. A malformed or unverifiable bundle is moved to processed/
+        with a .rejected suffix so it doesn't block the queue forever.
         Returns the number of tasks newly ingested.
         """
 
-        from self_harness.task_sources import TaskSourceError, ingest_failing_bundle
+        from self_harness.task_sources import UX_BUNDLE_KIND, TaskSourceError, ingest_inbox_bundle
 
         if not self.inbox_dir.is_dir():
             return 0
@@ -521,26 +523,49 @@ class HarnessUiApp:
         for bundle_path in bundles:
             try:
                 bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-                task = ingest_failing_bundle(bundle)
+                kind = bundle.get("kind", "failing_command") if isinstance(bundle, dict) else "failing_command"
+                task = ingest_inbox_bundle(bundle)
+                if kind == UX_BUNDLE_KIND:
+                    try:
+                        verified = self._verify_ux_task(task)
+                    except Exception as exc:  # noqa: BLE001 - verifier failures quarantine UX bundles.
+                        raise TaskSourceError(f"ux_complaint solve+verify guard failed: {exc}") from exc
+                    if not verified:
+                        raise TaskSourceError("ux_complaint failed mandatory solve+verify guard")
             except (OSError, json.JSONDecodeError, TaskSourceError) as exc:
                 _log(f"inbox: rejected {bundle_path.name}: {exc}")
                 bundle_path.rename(self.inbox_processed_dir / (bundle_path.name + ".rejected"))
                 continue
             learned.append(task)
             ingested += 1
-            _log(f"inbox: ingested failing bundle '{task['id']}' as a held-in task")
+            _log(f"inbox: ingested {kind} bundle '{task['id']}' as a held-in task")
             bundle_path.rename(self.inbox_processed_dir / bundle_path.name)
         if ingested:
             self._save_learned_tasks(learned)
         return ingested
 
-    def submit_inbox_bundle(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Validate and persist a failing-test bundle to the inbox (consumed on the next loop iteration)."""
+    def _verify_ux_task(self, task: dict[str, Any]) -> bool:
+        """Mandatory second gate for admitted semantic UX complaints.
 
-        from self_harness.task_sources import TaskSourceError, ingest_failing_bundle
+        Command bundles are self-validating because the failing command is the criterion. UX complaints
+        are semantic, so they must also be solve+verified before joining learned held-in tasks.
+        """
+
+        from self_harness.agentic_session import resolve_zai_api_key, resolve_zai_base_url
+        from self_harness.task_sources import filter_verified_tasks
+
+        api_key = resolve_zai_api_key()
+        base_url = resolve_zai_base_url()
+        verifier = self._build_task_verifier(api_key, base_url)
+        return bool(filter_verified_tasks([task], verifier))
+
+    def submit_inbox_bundle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Validate and persist a command or UX bundle to the inbox for the next loop iteration."""
+
+        from self_harness.task_sources import TaskSourceError, ingest_inbox_bundle
 
         try:
-            ingest_failing_bundle(payload)  # validate up front; raises on bad shape
+            ingest_inbox_bundle(payload)  # validate up front; raises on bad shape
         except TaskSourceError as exc:
             raise ValueError(str(exc)) from exc
         bundle_id = str(payload["id"])

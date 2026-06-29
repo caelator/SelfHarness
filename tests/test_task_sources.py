@@ -7,11 +7,15 @@ from self_harness.task_sources import (
     GENERATED_FAILURE_MODE,
     INGESTED_FAILURE_MODE,
     LEARNED_SPLIT,
+    UX_BUNDLE_KIND,
+    UX_COMPLAINT_FAILURE_MODE,
     TaskSourceError,
     assemble_corpus,
     dedupe_tasks,
     filter_verified_tasks,
     ingest_failing_bundle,
+    ingest_inbox_bundle,
+    ingest_ux_bundle,
     make_task,
     parse_generated_tasks,
 )
@@ -58,6 +62,59 @@ def test_ingest_bundle_rejects_workspace_escape() -> None:
         ingest_failing_bundle({"id": "x", "command": "c", "files": {"../evil": "y"}})
     with pytest.raises(TaskSourceError):
         ingest_failing_bundle({"id": "x", "command": "c", "files": {"/abs": "y"}})
+
+
+def test_ingest_ux_bundle_makes_held_in_task() -> None:
+    task = ingest_ux_bundle(
+        {
+            "id": "ux-identity",
+            "kind": UX_BUNDLE_KIND,
+            "trigger": "identity-query",
+            "observation": "GLM via Z.ai answered that it was Claude.",
+            "expected_behavior": "The CLI reports GLM via Z.ai and glm-5.2.",
+            "observed": "I'm Claude, made by Anthropic.",
+            "checkable_criterion": "Asking `what model are you` reports provider glm and model glm-5.2.",
+            "operating_provider": "glm",
+            "admitting_judge": "codex",
+            "admission_reason": "contradicts configured provider",
+            "files": {"notes.txt": "identity transcript\n"},
+        }
+    )
+
+    assert task["id"] == "ux-identity"
+    assert task["split"] == LEARNED_SPLIT
+    assert task["failure_mode"] == UX_COMPLAINT_FAILURE_MODE
+    assert "GLM via Z.ai answered" in task["metadata"]["instructions"]
+    assert "provider glm and model glm-5.2" in task["metadata"]["success_criteria"]
+    assert task["metadata"]["workspace_files"] == {"notes.txt": "identity transcript\n"}
+    assert task["metadata"]["operating_provider"] == "glm"
+    assert task["metadata"]["admitting_judge"] == "codex"
+
+
+def test_ingest_ux_bundle_requires_checkable_fields() -> None:
+    base = {"id": "ux", "kind": UX_BUNDLE_KIND, "trigger": "wrong", "observation": "bad"}
+    with pytest.raises(TaskSourceError, match="checkable_criterion"):
+        ingest_ux_bundle(base)
+    with pytest.raises(TaskSourceError, match="trigger"):
+        ingest_ux_bundle({**base, "trigger": "", "checkable_criterion": "c"})
+    with pytest.raises(TaskSourceError, match="workspace_files path escapes"):
+        ingest_ux_bundle({**base, "checkable_criterion": "c", "files": {"../escape": "x"}})
+
+
+def test_ingest_inbox_bundle_dispatches_legacy_and_ux() -> None:
+    command = ingest_inbox_bundle({"id": "cmd", "command": "pytest"})
+    ux = ingest_inbox_bundle(
+        {
+            "id": "ux",
+            "kind": UX_BUNDLE_KIND,
+            "trigger": "wrong",
+            "observation": "bad answer",
+            "checkable_criterion": "answer is corrected",
+        }
+    )
+
+    assert command["failure_mode"] == INGESTED_FAILURE_MODE
+    assert ux["failure_mode"] == UX_COMPLAINT_FAILURE_MODE
 
 
 def test_make_task_rejects_disallowed_metadata() -> None:

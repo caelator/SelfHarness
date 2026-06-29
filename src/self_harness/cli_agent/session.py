@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict
 
 from self_harness.adapters.agentic.agent_loop import run_agent_loop
 from self_harness.adapters.agentic.runner import DEFAULT_GLM_MODEL
@@ -25,6 +25,9 @@ from self_harness.cli_agent.harvest import FailureHarvester
 from self_harness.exceptions import InvalidPatchError
 from self_harness.harness import harness_hash, initial_harness, load_harness_spec
 from self_harness.types import HarnessSpec
+
+if TYPE_CHECKING:
+    from self_harness.cli_agent.ux_harvest import UxFailureHarvester
 
 DEFAULT_MAX_STEPS = 24  # higher than eval default: interactive coding turns can be longer.
 
@@ -79,6 +82,7 @@ class InteractiveSession:
     workdir: Path
     harness: HarnessSpec
     harvester: FailureHarvester
+    ux_harvester: UxFailureHarvester | None = None
     model: str = DEFAULT_GLM_MODEL
     max_steps: int = DEFAULT_MAX_STEPS
     tool_timeout_seconds: int = DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -211,6 +215,7 @@ class HeadlessCliSession:
     workdir: Path
     harness: HarnessSpec
     harvester: FailureHarvester
+    ux_harvester: UxFailureHarvester | None = None
     model: str | None = None
     effort: str | None = None
     max_steps: int = DEFAULT_MAX_STEPS
